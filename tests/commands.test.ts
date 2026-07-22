@@ -49,15 +49,15 @@ function captureCommand(engine: RVEngine): (args: string, ctx: ExtensionCommandC
   return (args, ctx) => registered(args, ctx);
 }
 
-test("/rv on does not claim automatic review exists before agent_end lands", async () => {
+test("/rv on enables automatic review honestly (session-scoped, not persisted)", async () => {
   const engine = fakeEngine();
   const handler = captureCommand(engine);
   const notifications: Notify[] = [];
   await handler("on always", fakeCtx(notifications));
   assert.equal(engine.config.mode, "always");
   const text = notifications.map((n) => n.message).join("\n");
-  assert.match(text, /not wired yet/i);
-  assert.doesNotMatch(text, /automatic review on every substantive completion/i);
+  assert.match(text, /automatic review at completion enabled/i);
+  assert.match(text, /this session/i); // honest about not persisting
 });
 
 test("/rv off sets mode off", async () => {

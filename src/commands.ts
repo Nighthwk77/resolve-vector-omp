@@ -3,45 +3,14 @@
  * manual review and (later) automatic activation share the engine and receipts.
  */
 import type { ExtensionCommandContext, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { lastExchangeFromEntries } from "./activation.js";
 import type { ActivationMode } from "./policy.js";
 import { renderStatusLine, renderVerdict } from "./render.js";
 import type { RVEngine } from "./runtime.js";
 
-function messageText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .filter(
-        (block): block is { type: "text"; text: string } =>
-          typeof block === "object" &&
-          block !== null &&
-          "type" in block &&
-          block.type === "text" &&
-          "text" in block &&
-          typeof block.text === "string",
-      )
-      .map((block) => block.text)
-      .join("");
-  }
-  return "";
-}
-
 /** Last user goal + last assistant answer on the current branch. */
 export function lastExchange(ctx: ExtensionCommandContext): { goal?: string; proposal?: string } {
-  const entries = ctx.sessionManager.getBranch();
-  let goal: string | undefined;
-  let proposal: string | undefined;
-  for (let i = entries.length - 1; i >= 0 && (goal === undefined || proposal === undefined); i--) {
-    const entry = entries[i];
-    if (entry.type !== "message") continue;
-    const message = entry.message;
-    if (!("role" in message) || !("content" in message)) continue;
-    const text = messageText(message.content).trim();
-    if (text.length === 0) continue;
-    if (message.role === "assistant" && proposal === undefined) proposal = text;
-    if (message.role === "user" && proposal !== undefined && goal === undefined) goal = text;
-  }
-  return { goal, proposal };
+  return lastExchangeFromEntries(ctx.sessionManager.getBranch());
 }
 
 async function cmdStatus(runtime: RVEngine, ctx: ExtensionCommandContext): Promise<void> {
@@ -113,9 +82,8 @@ async function dispatch(runtime: RVEngine, args: string, ctx: ExtensionCommandCo
         return;
       }
       runtime.setMode(mode);
-      // agent_end activation is Milestone 2 — do not claim automation exists.
       ctx.ui.notify(
-        `RV · mode set to "${mode}" (this session). Automatic review at completion is not wired yet (Milestone 2) — today reviews run via /rv review or the council_audit tool.`,
+        `RV · ${mode} — automatic review at completion enabled (this session). Not persisted to disk.`,
         "info",
       );
       return;

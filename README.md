@@ -64,9 +64,19 @@ verdicts from these receipts.
 
 ## Status
 
-Milestone 1 (vertical slice) works and is smoke-tested end to end:
-`/rv review` and the model-callable `council_audit` tool run a real
-cross-family review (GLM primary → local Qwen reviewer) with a typed verdict
-and durable receipt. `best`/`fusion`/`compare` return an explicit
-not-yet-implemented error until Milestone 3; `agent_end` activation is
-Milestone 2.
+Milestones 1–2 work and are smoke-tested end to end:
+
+- **M1 (vertical slice):** `/rv review` and the model-callable `council_audit`
+  tool run a real cross-family review (GLM primary → local Qwen reviewer) with
+  a typed verdict and durable receipt. External-call budgets are enforced by a
+  cross-process ledger (`resolve-vector.budget.jsonl`) with owner-token locks.
+- **M2 (automatic revision):** with `mode: "always"`, every substantive
+  `agent_end` is reviewed automatically. The answer is labeled provisional
+  while the review runs; a concern/fail injects a hidden `nextTurn`
+  corrective message and the revision is reviewed again, bounded by
+  `maxRevisionRounds`. Recursion guards prevent RV from reviewing its own
+  turns, the same entry twice, or two reviews at once. Unresolved loops stop
+  and hand the decision to the user.
+
+`best`/`fusion`/`compare` return an explicit not-yet-implemented error until
+Milestone 3.
