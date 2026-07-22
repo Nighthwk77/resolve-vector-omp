@@ -15,11 +15,18 @@ export default async function resolveVector(pi: ExtensionAPI): Promise<void> {
 
   const activation = new ActivationController(runtime, {
     notify: (ctx, message, type) => ctx.ui.notify(message, type),
-    sendCorrection: (text) =>
+    sendCorrection: (text, correctionId) =>
       // Hidden corrective turn: the model sees it next turn; the user does not
       // get an editable pending message. triggerTurn schedules the continuation.
+      // The unique correctionId tags the turn so only IT can consume the
+      // pending revision state.
       pi.sendMessage(
-        { customType: RV_CORRECTION_TYPE, content: [{ type: "text", text }], display: false },
+        {
+          customType: RV_CORRECTION_TYPE,
+          content: [{ type: "text", text }],
+          display: false,
+          details: { correctionId },
+        },
         { deliverAs: "nextTurn", triggerTurn: true },
       ),
     leafEntryId: (ctx) => ctx.sessionManager.getLeafEntry()?.id,

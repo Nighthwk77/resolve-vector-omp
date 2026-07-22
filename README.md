@@ -77,6 +77,12 @@ Milestones 1–2 work and are smoke-tested end to end:
   `maxRevisionRounds`. Recursion guards prevent RV from reviewing its own
   turns, the same entry twice, or two reviews at once. Unresolved loops stop
   and hand the decision to the user.
+- **M2.1 (lifecycle hardening):** reviews carry a session generation —
+  `session_start`/`session_switch` aborts the in-flight review and
+  invalidates its side effects; corrections carry unique IDs so only the
+  correlated turn consumes the revision state; overlapping completions are
+  coalesced into a one-item pending slot (newest wins) instead of being
+  dropped.
 
 `best`/`fusion`/`compare` return an explicit not-yet-implemented error until
 Milestone 3.

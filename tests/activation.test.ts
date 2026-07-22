@@ -13,7 +13,7 @@ import { DEFAULT_CONFIG, type ResolveVectorConfig } from "../src/policy.js";
 import type { CouncilVerdict, VerdictStatus } from "../src/receipts.js";
 import type { RVEngine, RunReviewRequest } from "../src/runtime.js";
 
-// Fake ctx: the controller only forwards it to the (faked) runtime.
+// Fake ctx: the controller only forwards it to the (faked) runtime and deps.
 const ctx = { isTestDouble: true } as unknown as ExtensionContext;
 
 function verdict(status: VerdictStatus, summary = "s"): CouncilVerdict {
@@ -46,29 +46,50 @@ function assistantTurn(text: string): unknown[] {
   return [{ role: "assistant", content: [{ type: "text", text }] }];
 }
 
+function correctionTurn(correctionId: string, revisedText = "the revised answer, long enough to matter"): unknown[] {
+  return [
+    { role: "custom", customType: RV_CORRECTION_TYPE, content: [], details: { correctionId } },
+    ...assistantTurn(revisedText),
+  ];
+}
+
+interface VerdictGate {
+  promise: Promise<CouncilVerdict>;
+  resolve: (value: CouncilVerdict) => void;
+  reject: (reason: unknown) => void;
+}
+
 interface Harness {
   controller: ActivationController;
   config: ResolveVectorConfig;
   reviews: RunReviewRequest[];
+  signals: (AbortSignal | undefined)[];
   notifications: string[];
-  corrections: string[];
+  corrections: { text: string; id: string }[];
   setVerdicts: (verdicts: CouncilVerdict[]) => void;
+  setProposal: (proposal: string) => void;
+  setLeaf: (leaf: string) => void;
+  gateNextReview: () => VerdictGate;
 }
 
 function makeHarness(mode: ResolveVectorConfig["mode"], overrides: Partial<ResolveVectorConfig> = {}): Harness {
   const config: ResolveVectorConfig = { ...DEFAULT_CONFIG, mode, reviewers: [], ...overrides };
   const reviews: RunReviewRequest[] = [];
+  const signals: (AbortSignal | undefined)[] = [];
   const notifications: string[] = [];
-  const corrections: string[] = [];
-  const queue: CouncilVerdict[] = [];
+  const corrections: { text: string; id: string }[] = [];
+  const queue: (CouncilVerdict | Promise<CouncilVerdict>)[] = [];
+  let proposal = "the completed answer under review, long enough to matter";
+  let leaf = "leaf-1";
   const engine: RVEngine = {
     paths: { configPath: "/tmp/c", receiptsPath: "/tmp/r", ledgerPath: "/tmp/l" },
     config,
     configErrors: [],
     configCreated: false,
     setMode: () => {},
-    runReview: (_ctx, request) => {
+    runReview: (_ctx, request, signal) => {
       reviews.push(request);
+      signals.push(signal);
       const next = queue.shift();
       if (!next) return Promise.reject(new Error("no verdict queued"));
       return Promise.resolve(next);
@@ -77,9 +98,9 @@ function makeHarness(mode: ResolveVectorConfig["mode"], overrides: Partial<Resol
   };
   const deps: ActivationDeps = {
     notify: (_ctx, message) => notifications.push(message),
-    sendCorrection: (text) => corrections.push(text),
-    leafEntryId: () => "leaf-1",
-    lastExchange: () => ({ goal: "the goal", proposal: "the completed answer under review, long enough to matter" }),
+    sendCorrection: (text, id) => corrections.push({ text, id }),
+    leafEntryId: () => leaf,
+    lastExchange: () => ({ goal: "the goal", proposal }),
     primaryFamily: () => "glm",
     rng: () => 0.5,
   };
@@ -87,13 +108,25 @@ function makeHarness(mode: ResolveVectorConfig["mode"], overrides: Partial<Resol
     controller: new ActivationController(engine, deps),
     config,
     reviews,
+    signals,
     notifications,
     corrections,
     setVerdicts: (verdicts) => queue.push(...verdicts),
+    setProposal: (next) => {
+      proposal = next;
+    },
+    setLeaf: (next) => {
+      leaf = next;
+    },
+    gateNextReview: () => {
+      const gate = Promise.withResolvers<CouncilVerdict>();
+      queue.push(gate.promise);
+      return gate;
+    },
   };
 }
 
-test("analyzeTurn: substantive text, tool mutations, and rv-correction markers", () => {
+test("analyzeTurn: substantive text, tool mutations, correction markers and ids", () => {
   const short = analyzeTurn([{ role: "assistant", content: [{ type: "text", text: "Done." }] }]);
   assert.equal(short.substantive, false);
 
@@ -108,8 +141,13 @@ test("analyzeTurn: substantive text, tool mutations, and rv-correction markers",
   assert.equal(edited.substantive, true);
   assert.equal(edited.filesChanged, true);
 
-  const rvTurn = analyzeTurn([{ role: "custom", customType: RV_CORRECTION_TYPE, content: [] }]);
+  const rvTurn = analyzeTurn(correctionTurn("rv-cor-0-1"));
   assert.equal(rvTurn.isReviewTurn, true);
+  assert.equal(rvTurn.correctionId, "rv-cor-0-1");
+
+  const unmarked = analyzeTurn([{ role: "custom", customType: RV_CORRECTION_TYPE, content: [] }]);
+  assert.equal(unmarked.isReviewTurn, true);
+  assert.equal(unmarked.correctionId, undefined);
 });
 
 test("shouldActivate honors every mode", () => {
@@ -151,47 +189,61 @@ test("off and manual modes never activate", async () => {
   }
 });
 
-test("concern injects one hidden corrective nextTurn and marks the revision expectation", async () => {
+test("concern injects one hidden corrective nextTurn carrying a unique id", async () => {
   const h = makeHarness("always", { maxRevisionRounds: 2 });
   h.setVerdicts([verdict("concern")]);
   await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
   assert.equal(h.corrections.length, 1);
-  assert.match(h.corrections[0], /CONCERN/);
-  assert.match(h.corrections[0], /2\+2=5/);
-  assert.match(h.corrections[0], /state 4/);
+  assert.match(h.corrections[0].text, /CONCERN/);
+  assert.match(h.corrections[0].text, /2\+2=5/);
+  assert.match(h.corrections[0].text, /state 4/);
   assert.equal(h.controller.reviewState.revisionRound, 1);
-  assert.equal(h.controller.reviewState.expectingRevision, true);
+  assert.equal(h.controller.reviewState.pendingCorrectionId, h.corrections[0].id);
 });
 
-test("the revision turn is reviewed once more; pass resets the loop", async () => {
+test("the correlated correction turn is reviewed exactly once as a revision", async () => {
   const h = makeHarness("always", { maxRevisionRounds: 2 });
   h.setVerdicts([verdict("concern"), verdict("pass")]);
   await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
-  // Revision turn carries the rv-correction marker.
-  await h.controller.onAgentEnd([{ role: "custom", customType: RV_CORRECTION_TYPE, content: [] }, ...assistantTurn("revised")], ctx);
+  const id = h.corrections[0].id;
+  await h.controller.onAgentEnd(correctionTurn(id), ctx);
   assert.equal(h.reviews.length, 2);
   assert.equal(h.reviews[1].activationReason, "revision");
   assert.equal(h.reviews[1].revisionRound, 1);
   assert.equal(h.controller.reviewState.revisionRound, 0);
-  assert.ok(h.notifications.some((n) => n.includes("verified")));
+  assert.equal(h.controller.reviewState.pendingCorrectionId, undefined);
+  // The same marker turn again: consumed, never re-reviewed as a revision.
+  await h.controller.onAgentEnd(correctionTurn(id), ctx);
+  assert.equal(h.reviews.length, 2);
 });
 
-test("recursion guard: an RV-triggered turn never starts a NEW activation", async () => {
+test("a stale/uncorrelated rv-correction marker does not activate anything", async () => {
   const h = makeHarness("always");
-  h.setVerdicts([verdict("pass")]);
-  // Marker turn with NO prior correction expectation and no queued expectation:
-  // reviewed as a revision turn (not double-activated as a fresh turn).
-  await h.controller.onAgentEnd([{ role: "custom", customType: RV_CORRECTION_TYPE, content: [] }], ctx);
-  assert.equal(h.reviews.length, 1); // revision review only
-  assert.equal(h.reviews[0].activationReason, "revision");
-  assert.equal(h.corrections.length, 0); // pass → no further loop
+  await h.controller.onAgentEnd(correctionTurn("rv-cor-9-9"), ctx);
+  assert.equal(h.reviews.length, 0);
+});
+
+test("a normal user turn while a correction is pending stays a normal turn", async () => {
+  const h = makeHarness("always", { maxRevisionRounds: 2 });
+  h.setVerdicts([verdict("concern"), verdict("pass")]);
+  await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  const pendingId = h.controller.reviewState.pendingCorrectionId;
+  assert.ok(pendingId);
+  // User drives a brand-new turn BEFORE the hidden correction completes.
+  h.setLeaf("leaf-2");
+  h.setProposal("a brand-new unrelated user answer, also long enough");
+  await h.controller.onAgentEnd(assistantTurn("a brand-new unrelated user answer, also long enough"), ctx);
+  assert.equal(h.reviews.length, 2);
+  assert.equal(h.reviews[1].activationReason, "agent_end"); // NOT a revision
+  assert.equal(h.reviews[1].proposal, "a brand-new unrelated user answer, also long enough");
+  assert.equal(h.controller.reviewState.pendingCorrectionId, pendingId); // still pending
 });
 
 test("unresolved after maxRevisionRounds: loop stops and asks the user", async () => {
   const h = makeHarness("always", { maxRevisionRounds: 1 });
   h.setVerdicts([verdict("concern"), verdict("concern")]);
   await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
-  await h.controller.onAgentEnd([{ role: "custom", customType: RV_CORRECTION_TYPE, content: [] }], ctx);
+  await h.controller.onAgentEnd(correctionTurn(h.corrections[0].id), ctx);
   assert.equal(h.corrections.length, 1); // round 1 only; no second correction
   assert.equal(h.controller.reviewState.revisionRound, 0);
   assert.ok(h.notifications.some((n) => /unresolved after 1 revision round/.test(n)));
@@ -206,37 +258,58 @@ test("the same leaf entry is never reviewed twice", async () => {
   assert.equal(h.reviews.length, 1);
 });
 
-test("overlap guard: a second agent_end during a review does not double-dispatch", async () => {
+test("two completions during one review: newest pending is reviewed once", async () => {
   const h = makeHarness("always");
-  const gate = Promise.withResolvers<CouncilVerdict>();
-  // Rebuild with a gated verdict to hold the review open.
-  const config: ResolveVectorConfig = { ...DEFAULT_CONFIG, mode: "always", reviewers: [] };
-  const reviews: RunReviewRequest[] = [];
-  const engine: RVEngine = {
-    paths: { configPath: "/tmp/c", receiptsPath: "/tmp/r", ledgerPath: "/tmp/l" },
-    config,
-    configErrors: [],
-    configCreated: false,
-    setMode: () => {},
-    runReview: (_ctx, request) => {
-      reviews.push(request);
-      return gate.promise;
-    },
-    recentReceipts: () => Promise.resolve([]),
-  };
-  const deps: ActivationDeps = {
-    notify: () => {},
-    sendCorrection: () => {},
-    leafEntryId: () => "leaf-1",
-    lastExchange: () => ({ goal: "g", proposal: "a substantive answer long enough to matter" }),
-    primaryFamily: () => "glm",
-  };
-  const controller = new ActivationController(engine, deps);
-  const first = controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
-  await controller.onAgentEnd(assistantTurn("another substantive answer long enough"), ctx); // in-flight → skip
+  const gate = h.gateNextReview();
+  h.setVerdicts([]);
+  const first = h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  // Two substantive completions land while the first review is in flight.
+  h.setLeaf("leaf-2");
+  h.setProposal("middle answer that will be superseded by the newest one");
+  await h.controller.onAgentEnd(assistantTurn("middle answer that will be superseded by the newest one"), ctx);
+  h.setLeaf("leaf-3");
+  h.setProposal("newest answer that must be reviewed after the in-flight one");
+  await h.controller.onAgentEnd(assistantTurn("newest answer that must be reviewed after the in-flight one"), ctx);
+  h.setVerdicts([verdict("pass")]);
   gate.resolve(verdict("pass"));
   await first;
-  assert.equal(reviews.length, 1);
+  // Exactly one follow-up review, and it covered the NEWEST proposal.
+  assert.equal(h.reviews.length, 2);
+  assert.equal(h.reviews[1].proposal, "newest answer that must be reviewed after the in-flight one");
+  assert.equal(h.reviews[1].activationReason, "agent_end");
+});
+
+test("session switch during a slow review: no side effects reach the new session", async () => {
+  const h = makeHarness("always", { maxRevisionRounds: 2 });
+  const gate = h.gateNextReview();
+  const first = h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  // Session B starts: reset invalidates generation and aborts the review.
+  h.controller.reset();
+  const notesAtReset = h.notifications.length;
+  gate.resolve(verdict("fail")); // A's review finishes AFTER the switch
+  await first;
+  // No notification, correction, or state mutation from the dead session.
+  assert.equal(h.notifications.length, notesAtReset);
+  assert.equal(h.corrections.length, 0);
+  assert.equal(h.controller.reviewState.reviewing, false);
+  assert.equal(h.controller.reviewState.revisionRound, 0);
+  assert.equal(h.controller.reviewState.pendingCorrectionId, undefined);
+  assert.equal(h.controller.reviewState.lastReviewedEntryId, undefined);
+  // Cancellation actually reached the reviewer transport.
+  assert.equal(h.signals[0]?.aborted, true);
+});
+
+test("reset during an in-flight pass: stale completion cannot overwrite fresh state", async () => {
+  const h = makeHarness("always");
+  const gate = h.gateNextReview();
+  const first = h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  h.controller.reset();
+  const notesAtReset = h.notifications.length;
+  gate.resolve(verdict("pass"));
+  await first;
+  assert.equal(h.notifications.length, notesAtReset); // no "verified" from the stale review
+  assert.equal(h.controller.reviewState.lastReviewedEntryId, undefined);
+  assert.equal(h.controller.reviewState.reviewing, false);
 });
 
 test("buildCorrectionMessage cites findings and demands resolution", () => {

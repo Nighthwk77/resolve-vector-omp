@@ -1,19 +1,21 @@
 /**
  * Completion-boundary activation: agent_end trigger policy, provisional
- * labeling, the corrective nextTurn loop, and the recursion guards that keep
- * RV from ever reviewing its own review machinery.
+ * labeling, the corrective nextTurn loop, and the guards that keep RV from
+ * ever reviewing its own review machinery.
  *
- * Flow (brief §5): primary agent finishes → substantive non-RV turn activates
- * per mode → answer marked provisional → council runs headlessly → pass renders
- * verified; concern/fail injects a hidden nextTurn correction → the revision
- * turn is itself reviewed, bounded by maxRevisionRounds → unresolved means the
- * loop STOPS and the user decides.
- *
- * Loop safety invariants:
- * - RV never reviews a turn it triggered (rv-correction marker or pending flag).
- * - The same leaf entry is never reviewed twice.
- * - At most maxRevisionRounds corrections per answer; then the loop stops.
- * - One review in flight at a time (`reviewing` guard).
+ * M2.1 lifecycle hardening:
+ * - GENERATIONS: every review captures a generation token. session_start /
+ *   session_switch (reset) increments the generation and aborts the in-flight
+ *   review. After every await, the review verifies its generation is still
+ *   current before touching state, notifying, or correcting — a stale review
+ *   from a dead session can never reach the active one.
+ * - CORRECTION OWNERSHIP: each hidden correction carries a unique id. Only a
+ *   turn containing that exact rv-correction id consumes the pending revision
+ *   state; an unrelated user turn is always a normal turn.
+ * - OVERLAP COALESCING: a substantive agent_end arriving mid-review is held
+ *   in a one-item pending slot (newest wins) and reviewed once when the
+ *   current review drains. A pending completion superseded by a corrective
+ *   revision is dropped WITH a notification, never silently.
  */
 import type { ExtensionContext, SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import type { ActivationMode, ResolveVectorConfig } from "./policy.js";
@@ -29,8 +31,10 @@ export interface ReviewState {
   lastReviewedEntryId?: string;
   revisionRound: number;
   reviewTurnIds: string[];
-  /** Set when a corrective nextTurn is in flight; the next agent_end is ours. */
-  expectingRevision: boolean;
+  /** Id of the correction whose turn we expect; only that turn consumes it. */
+  pendingCorrectionId?: string;
+  /** Newest completion waiting for the in-flight review; one slot, newest wins. */
+  pendingTurn?: { reason: "agent_end" | "revision" };
 }
 
 export interface TurnAnalysis {
@@ -41,12 +45,14 @@ export interface TurnAnalysis {
   filesChanged: boolean;
   /** Turn contains an rv-correction marker → RV triggered it. */
   isReviewTurn: boolean;
+  /** Unique id of the correction this turn answers, if marked. */
+  correctionId?: string;
 }
 
 export interface ActivationDeps {
   notify: (ctx: ExtensionContext, message: string, type?: "info" | "warning" | "error") => void;
-  /** Hidden corrective injection: deliverAs nextTurn + triggerTurn. */
-  sendCorrection: (text: string) => void;
+  /** Hidden corrective injection: deliverAs nextTurn + triggerTurn, tagged with the id. */
+  sendCorrection: (text: string, correctionId: string) => void;
   leafEntryId: (ctx: ExtensionContext) => string | undefined;
   lastExchange: (ctx: ExtensionContext) => { goal?: string; proposal?: string };
   primaryFamily: (ctx: ExtensionContext) => string | undefined;
@@ -56,23 +62,6 @@ export interface ActivationDeps {
 const MIN_SUBSTANTIVE_CHARS = 40;
 const AUTO_LONG_ANSWER_CHARS = 500;
 const MUTATING_TOOLS: Record<string, true> = { edit: true, write: true, bash: true };
-
-/** Last user goal + last assistant answer on the current branch (shared with /rv review). */
-export function lastExchangeFromEntries(entries: readonly SessionEntry[]): { goal?: string; proposal?: string } {
-  let goal: string | undefined;
-  let proposal: string | undefined;
-  for (let i = entries.length - 1; i >= 0 && (goal === undefined || proposal === undefined); i--) {
-    const entry = entries[i];
-    if (entry.type !== "message") continue;
-    const message = entry.message;
-    if (!("role" in message) || !("content" in message)) continue;
-    const text = messageText(message.content).trim();
-    if (text.length === 0) continue;
-    if (message.role === "assistant" && proposal === undefined) proposal = text;
-    if (message.role === "user" && proposal !== undefined && goal === undefined) goal = text;
-  }
-  return { goal, proposal };
-}
 
 function messageText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -93,6 +82,23 @@ function messageText(content: unknown): string {
   return "";
 }
 
+/** Last user goal + last assistant answer on the current branch (shared with /rv review). */
+export function lastExchangeFromEntries(entries: readonly SessionEntry[]): { goal?: string; proposal?: string } {
+  let goal: string | undefined;
+  let proposal: string | undefined;
+  for (let i = entries.length - 1; i >= 0 && (goal === undefined || proposal === undefined); i--) {
+    const entry = entries[i];
+    if (entry.type !== "message") continue;
+    const message = entry.message;
+    if (!("role" in message) || !("content" in message)) continue;
+    const text = messageText(message.content).trim();
+    if (text.length === 0) continue;
+    if (message.role === "assistant" && proposal === undefined) proposal = text;
+    if (message.role === "user" && proposal !== undefined && goal === undefined) goal = text;
+  }
+  return { goal, proposal };
+}
+
 /**
  * Classify a completed agent turn. `messages` is the AgentEndEvent payload:
  * turn-local, so an rv-correction marker here means RV triggered the turn.
@@ -101,10 +107,15 @@ export function analyzeTurn(messages: readonly unknown[]): TurnAnalysis {
   let proposal: string | undefined;
   let filesChanged = false;
   let isReviewTurn = false;
+  let correctionId: string | undefined;
   for (const message of messages) {
     if (typeof message !== "object" || message === null || !("role" in message)) continue;
     if (message.role === "custom" && "customType" in message && message.customType === RV_CORRECTION_TYPE) {
       isReviewTurn = true;
+      if ("details" in message && typeof message.details === "object" && message.details !== null && "correctionId" in message.details) {
+        const candidate = message.details.correctionId;
+        if (typeof candidate === "string") correctionId = candidate;
+      }
       continue;
     }
     if (message.role === "assistant" && "content" in message) {
@@ -116,7 +127,7 @@ export function analyzeTurn(messages: readonly unknown[]): TurnAnalysis {
     }
   }
   const substantive = (proposal !== undefined && proposal.length >= MIN_SUBSTANTIVE_CHARS) || filesChanged;
-  return { substantive, proposal, filesChanged, isReviewTurn };
+  return { substantive, proposal, filesChanged, isReviewTurn, correctionId };
 }
 
 /** Mode policy. auto = initial deterministic heuristic per brief §5 (files changed or a long consequential answer). */
@@ -167,8 +178,12 @@ export class ActivationController {
     reviewing: false,
     revisionRound: 0,
     reviewTurnIds: [],
-    expectingRevision: false,
   };
+  /** Incremented on every session reset; captured by each review. */
+  private generation = 0;
+  private correctionCounter = 0;
+  /** Aborts the in-flight review on session reset. */
+  private inFlight?: AbortController;
 
   constructor(
     private readonly runtime: RVEngine,
@@ -182,30 +197,53 @@ export class ActivationController {
 
   /** agent_end entry point. Never throws; failures degrade to a notify. */
   async onAgentEnd(messages: readonly unknown[], ctx: ExtensionContext): Promise<void> {
+    const gen = this.generation;
     try {
       await this.handle(messages, ctx);
     } catch (error) {
+      if (gen !== this.generation) return; // stale session: silent
       this.state.reviewing = false;
       this.deps.notify(ctx, `RV · review failed: ${(error as Error).message}`, "warning");
     }
+  }
+
+  /** New session boundary: invalidate everything from the previous session. */
+  reset(): void {
+    this.generation += 1;
+    this.inFlight?.abort();
+    this.inFlight = undefined;
+    this.state.reviewing = false;
+    this.state.lastReviewedEntryId = undefined;
+    this.state.revisionRound = 0;
+    this.state.reviewTurnIds = [];
+    this.state.pendingCorrectionId = undefined;
+    this.state.pendingTurn = undefined;
   }
 
   private async handle(messages: readonly unknown[], ctx: ExtensionContext): Promise<void> {
     const config = this.runtime.config;
     const turn = analyzeTurn(messages);
 
-    // Revision turns (triggered by our correction) skip activation policy but
-    // are themselves reviewed — bounded by maxRevisionRounds.
-    const isRevisionTurn = this.state.expectingRevision || turn.isReviewTurn;
-    this.state.expectingRevision = false;
-    if (isRevisionTurn) {
-      if (this.state.reviewing) return;
+    // Only the turn carrying OUR correction id is a revision. An unrelated
+    // user turn while a correction is pending stays a normal turn.
+    const isCorrelatedRevision =
+      turn.correctionId !== undefined && turn.correctionId === this.state.pendingCorrectionId;
+    if (isCorrelatedRevision) {
+      this.state.pendingCorrectionId = undefined;
+      if (this.state.reviewing) {
+        this.state.pendingTurn = { reason: "revision" };
+        return;
+      }
       await this.reviewCurrentAnswer(ctx, "revision");
       return;
     }
 
     if (!shouldActivate(config, turn, this.deps.rng ?? Math.random)) return;
-    if (this.state.reviewing) return; // one review in flight
+    if (this.state.reviewing) {
+      // Coalesce: keep only the newest completion for after the current review.
+      this.state.pendingTurn = { reason: "agent_end" };
+      return;
+    }
 
     const leaf = this.deps.leafEntryId(ctx);
     if (leaf !== undefined && leaf === this.state.lastReviewedEntryId) return; // never twice
@@ -213,31 +251,57 @@ export class ActivationController {
     await this.reviewCurrentAnswer(ctx, "agent_end", leaf);
   }
 
-  private async reviewCurrentAnswer(ctx: ExtensionContext, reason: "agent_end" | "revision", leaf?: string): Promise<void> {
-    const { goal, proposal } = this.deps.lastExchange(ctx);
-    if (!proposal || proposal.trim().length === 0) return;
-
+  private async reviewCurrentAnswer(
+    ctx: ExtensionContext,
+    reason: "agent_end" | "revision",
+    leaf?: string,
+  ): Promise<void> {
+    const gen = this.generation;
+    let current: { reason: "agent_end" | "revision"; leaf?: string } = { reason, leaf };
     this.state.reviewing = true;
-    this.deps.notify(ctx, `RV · provisional — reviewing previous answer…`, "info");
+    const controller = new AbortController();
+    this.inFlight = controller;
     try {
-      const verdict = await this.runtime.runReview(
-        ctx,
-        {
-          goal: goal ?? "(goal unavailable — review the answer on its own merits)",
-          proposal,
-          primaryFamily: this.deps.primaryFamily(ctx),
-          activationReason: reason,
-          revisionRound: this.state.revisionRound,
-        },
-      );
-      const entryId = leaf ?? this.deps.leafEntryId(ctx);
-      if (entryId !== undefined) {
-        this.state.lastReviewedEntryId = entryId;
-        if (reason === "revision") this.state.reviewTurnIds.push(entryId);
+      for (;;) {
+        const { goal, proposal } = this.deps.lastExchange(ctx);
+        if (!proposal || proposal.trim().length === 0) return;
+        this.deps.notify(ctx, `RV · provisional — reviewing previous answer…`, "info");
+        const verdict = await this.runtime.runReview(
+          ctx,
+          {
+            goal: goal ?? "(goal unavailable — review the answer on its own merits)",
+            proposal,
+            primaryFamily: this.deps.primaryFamily(ctx),
+            activationReason: current.reason,
+            revisionRound: this.state.revisionRound,
+          },
+          controller.signal,
+        );
+        // Stale-session guard: after every await, bail without side effects.
+        if (gen !== this.generation) return;
+        const entryId = current.leaf ?? this.deps.leafEntryId(ctx);
+        if (entryId !== undefined) {
+          this.state.lastReviewedEntryId = entryId;
+          if (current.reason === "revision") this.state.reviewTurnIds.push(entryId);
+        }
+        this.actOnVerdict(ctx, verdict);
+
+        // Drain the coalesced pending completion — unless a corrective
+        // revision now owns the next turn (the pending answer is superseded).
+        const pending = this.state.pendingTurn;
+        this.state.pendingTurn = undefined;
+        if (pending === undefined) return;
+        if (this.state.pendingCorrectionId !== undefined) {
+          this.deps.notify(ctx, "RV · queued completion superseded by corrective revision", "info");
+          return;
+        }
+        current = pending;
       }
-      this.actOnVerdict(ctx, verdict);
     } finally {
-      this.state.reviewing = false;
+      if (gen === this.generation) {
+        this.state.reviewing = false;
+        this.inFlight = undefined;
+      }
     }
   }
 
@@ -255,8 +319,10 @@ export class ActivationController {
       default: {
         if (this.state.revisionRound < max) {
           this.state.revisionRound += 1;
-          this.state.expectingRevision = true;
-          this.deps.sendCorrection(buildCorrectionMessage(verdict));
+          this.correctionCounter += 1;
+          const correctionId = `rv-cor-${this.generation.toString(36)}-${this.correctionCounter.toString(36)}`;
+          this.state.pendingCorrectionId = correctionId;
+          this.deps.sendCorrection(buildCorrectionMessage(verdict), correctionId);
           this.deps.notify(
             ctx,
             `${renderStatusLine(verdict)} — revision requested (round ${this.state.revisionRound}/${max})`,
@@ -273,14 +339,5 @@ export class ActivationController {
         }
       }
     }
-  }
-
-  /** Fresh session state on session_start/switch. */
-  reset(): void {
-    this.state.reviewing = false;
-    this.state.lastReviewedEntryId = undefined;
-    this.state.revisionRound = 0;
-    this.state.reviewTurnIds = [];
-    this.state.expectingRevision = false;
   }
 }
