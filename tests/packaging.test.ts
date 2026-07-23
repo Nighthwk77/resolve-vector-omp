@@ -41,6 +41,8 @@ test("packaged artifact: contents and install/update/rollback/uninstall cycle", 
     "package/examples/local-openai-compatible.json",
     "package/examples/kimi-external-redacted.json",
     "package/examples/omp-provider.json",
+    "package/docs/GETTING_STARTED.md",
+    "package/docs/CONFIGURATION.md",
   ];
   for (const entry of required) {
     assert.ok(listing.includes(entry), `tarball missing ${entry}`);

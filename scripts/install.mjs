@@ -103,8 +103,10 @@ async function installNatives() {
   await rename(join(unpackDir, "package"), dest);
   await rm(unpackDir, { recursive: true, force: true });
   await rm(tarballPath, { force: true });
-  if (!existsSync(join(dest, `pi_natives.${process.platform}-${arch}.node`))) {
-    die(`${nativesPkg} unpacked but the .node binary is missing`);
+  const nativeFiles = await readdir(dest);
+  const nativePrefix = `pi_natives.${process.platform}-${arch}`;
+  if (!nativeFiles.some((file) => file.startsWith(nativePrefix) && file.endsWith(".node"))) {
+    die(`${nativesPkg} unpacked but no ${nativePrefix}*.node binary is present`);
   }
   console.log(`native addon installed: ${nativesPkg}`);
 }
