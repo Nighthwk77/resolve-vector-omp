@@ -33,6 +33,7 @@ function fakeEngine(): RVEngine {
     runReview: () => Promise.reject(new Error("not under test")),
     runEnsemble: () => Promise.reject(new Error("not under test")),
     recentReceipts: () => Promise.resolve([]),
+    reload: () => Promise.resolve(),
   };
   return engine;
 }

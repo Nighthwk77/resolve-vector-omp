@@ -96,6 +96,7 @@ function makeHarness(mode: ResolveVectorConfig["mode"], overrides: Partial<Resol
     },
     runEnsemble: () => Promise.reject(new Error("not under test")),
     recentReceipts: () => Promise.resolve([]),
+    reload: () => Promise.resolve(),
   };
   const deps: ActivationDeps = {
     notify: (_ctx, message) => notifications.push(message),

@@ -73,6 +73,7 @@ function makeTool(seats = 1): ToolHarness {
       return Promise.resolve(fakeVerdict);
     },
     recentReceipts: () => Promise.resolve([]),
+    reload: () => Promise.resolve(),
   };
   let execute: Execute | undefined;
   // TypeBox shim double: the tool only calls these builders; contents are irrelevant here.

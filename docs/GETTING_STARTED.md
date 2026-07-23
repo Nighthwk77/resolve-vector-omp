@@ -30,61 +30,55 @@ npm run install-preview
 The installer copies RV to `~/.omp/agent/extensions/resolve-vector-omp` and
 creates `~/.omp/agent/resolve-vector.json` only when it does not already exist.
 
+## 3. Run the setup wizard
+
 Restart OMP and run:
 
 ```text
-/rv doctor
+/rv setup
 ```
 
-Seeing “no reviewers configured” at this point is expected.
+The wizard is the normal path — no JSON editing, no models.yml inspection:
 
-## 3. Choose a reviewer
+1. It lists the models already authenticated in your OMP session and shows
+   each candidate's provider, model, family, and local/external endpoint.
+2. Models from your primary's family are excluded, with the reason shown —
+   cross-family review is the whole point.
+3. Local endpoints are detected automatically and default to `local-only`
+   (content never leaves the machine). External endpoints default to
+   `external-redacted`; sending full unredacted content requires an explicit
+   yes at a confirmation prompt.
+4. You pick the activation mode (`manual` is recommended initially), review
+   the summary — reviewers, content recipients, scopes, budgets, mode — and
+   confirm before anything is written.
+5. The config is written atomically (existing config backed up first, your
+   unrelated settings preserved), the runtime reloads without a restart, and
+   the wizard finishes with the same checks `/rv doctor` runs.
 
-### Kimi reviewer
+Cancel at any prompt and nothing is written.
 
-Use this when your primary model is not Kimi/Moonshot and Kimi already works in
-OMP:
+### Advanced: configure by hand
+
+If you prefer editing JSON (or script your setups), copy one of the examples
+and adjust it:
 
 ```bash
-cp examples/kimi-external-redacted.json ~/.omp/agent/resolve-vector.json
+cp examples/kimi-external-redacted.json ~/.omp/agent/resolve-vector.json   # Kimi, redacted
+cp examples/local-openai-compatible.json ~/.omp/agent/resolve-vector.json  # local server
+cp examples/omp-provider.json ~/.omp/agent/resolve-vector.json             # any OMP provider
 ```
 
-This sends redacted task content to Kimi. Redaction removes common secret
-shapes, but context and intent can still be sensitive.
-
-### Local OpenAI-compatible reviewer
-
-Use this for vllm-mlx, vLLM, Ollama, or LM Studio:
-
-1. Confirm the server is running.
-2. Query its models:
-
-   ```bash
-   curl http://127.0.0.1:8001/v1/models
-   ```
-
-3. Add the provider to `~/.omp/agent/models.yml` using the `_models_yml`
-   template in `examples/local-openai-compatible.json`.
-4. Copy the example to `~/.omp/agent/resolve-vector.json`.
-5. Replace every `<model-id-from-/v1/models>` placeholder with the returned ID.
-
-Local seats use `scope: "local-only"` and send nothing off the machine.
-
-### Any provider already in OMP
-
-Copy `examples/omp-provider.json`, then replace the provider, model, and family
-placeholders with values from OMP’s `/model` picker:
-
-```bash
-cp examples/omp-provider.json ~/.omp/agent/resolve-vector.json
-```
-
-For cloud providers, keep `scope: "external-redacted"` until you have made an
-explicit decision to allow full content.
+Replace every `<placeholder>` with real values — `/model` inside OMP shows
+valid provider/model IDs, and local servers answer `curl
+http://127.0.0.1:8001/v1/models`. For cloud providers, keep `scope:
+"external-redacted"` until you have made an explicit decision to allow full
+content. Local seats use `scope: "local-only"` and send nothing off the
+machine.
 
 ## 4. Validate before reviewing
 
-Restart OMP and run:
+The wizard already ran doctor's checks as its last step. If you configured by
+hand (or want to re-verify later), run:
 
 ```text
 /rv doctor

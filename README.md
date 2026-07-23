@@ -41,33 +41,36 @@ npm run install-preview
 Restart OMP, then run:
 
 ```text
-/rv doctor
+/rv setup
 ```
+
+The native wizard lists your authenticated models (provider, model, family,
+local/external), excludes same-family candidates with reasons, detects local
+endpoints, defaults external seats to redacted transport, and writes the
+config atomically after a review page — no JSON editing required. It finishes
+with `/rv doctor`'s checks and reloads the runtime, so no second restart is
+needed.
 
 The safe starter configuration is manual with no reviewers, so installation
 never starts sending your work to another provider unexpectedly.
 
 ## Get to the first review
 
-Pick a reviewer from [`examples/`](examples/). The quickest cloud example is
-Kimi:
-
-```bash
-cp examples/kimi-external-redacted.json ~/.omp/agent/resolve-vector.json
-```
-
-Restart OMP, confirm `/rv doctor` passes, ask your primary model to complete a
-task, then run:
+`/rv setup` is the primary path. After it completes, ask your primary model to
+complete a task, then run:
 
 ```text
 /rv review
 ```
 
-The reviewer must be a different model family from the primary. If your primary
-is Kimi, use the local or generic OMP-provider example instead.
+Prefer editing JSON? Copy a starter from [`examples/`](examples/) instead
+(local server, Kimi external-redacted, or any OMP provider) — see the
+*Advanced: configure by hand* section in
+**[Getting Started](docs/GETTING_STARTED.md)**.
 
-For a guided walkthrough—including local Qwen/vLLM, privacy choices, and custom
-providers—see **[Getting Started](docs/GETTING_STARTED.md)**.
+The reviewer must be a different model family from the primary. The wizard
+enforces this; by hand, use a local or generic-provider example when your
+primary is Kimi.
 
 ## What you see
 
@@ -109,6 +112,7 @@ the current session with `/rv on auto`, `/rv on always`, or `/rv off`.
 | `/rv compare [n]` | Show alternatives without forcing a winner |
 | `/rv status` | Show mode, reviewers, privacy scopes, budgets, and recent verdicts |
 | `/rv usage` | Show GLM/Z.ai quota when the local proxy is configured |
+| `/rv setup` | Native wizard: reviewers, privacy scopes, activation mode, atomic write |
 | `/rv doctor` | Check models, credentials, endpoints, paths, privacy, and OMP version |
 | `/rv on [auto\|always\|sample]` | Enable automatic review for this session |
 | `/rv off` | Disable automatic review for this session |

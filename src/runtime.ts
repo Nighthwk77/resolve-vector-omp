@@ -67,12 +67,14 @@ export interface RunEnsembleRequest {
 export interface RVEngine {
   readonly paths: RuntimePaths;
   readonly config: ResolveVectorConfig;
-  readonly configErrors: string[];
-  readonly configCreated: boolean;
+  configErrors: string[];
+  configCreated: boolean;
   setMode(mode: ActivationMode): void;
   runReview(ctx: ExtensionContext, request: RunReviewRequest, signal?: AbortSignal): Promise<CouncilVerdict>;
   runEnsemble(ctx: ExtensionContext, request: RunEnsembleRequest, signal?: AbortSignal): Promise<CouncilVerdict>;
   recentReceipts(limit: number): Promise<ReviewReceipt[]>;
+  /** Re-read config from disk and rebuild dependent state (used by /rv setup). */
+  reload(): Promise<void>;
 }
 
 export interface RuntimeOptions {
@@ -83,14 +85,14 @@ export interface RuntimeOptions {
 }
 
 export class RVRuntime implements RVEngine {
-  private readonly budget: RuntimeOptions["budget"];
+  private budget: BudgetCoordinator;
   private readonly complete: CouncilDeps["complete"];
 
   private constructor(
     public readonly paths: RuntimePaths,
     public config: ResolveVectorConfig,
-    public readonly configErrors: string[],
-    public readonly configCreated: boolean,
+    public configErrors: string[],
+    public configCreated: boolean,
     options: RuntimeOptions = {},
   ) {
     this.complete =
@@ -113,6 +115,17 @@ export class RVRuntime implements RVEngine {
   /** Session-scoped mode change. Persisting to disk is a deliberate non-goal for M1. */
   setMode(mode: ActivationMode): void {
     this.config = { ...this.config, mode };
+  }
+
+  /** Re-read config from disk; rebuild the budget ledger (caps may have changed). */
+  async reload(): Promise<void> {
+    const { config, errors, created } = await loadConfig(this.paths.configPath);
+    this.config = config;
+    this.configErrors = errors;
+    this.configCreated = created;
+    this.budget = new FileBudgetLedger(config, this.paths.ledgerPath, async () => {
+      return externalCallUnits(await readReceipts(this.paths.receiptsPath).catch(() => []));
+    });
   }
 
   async runReview(ctx: ExtensionContext, request: RunReviewRequest, signal?: AbortSignal): Promise<CouncilVerdict> {
