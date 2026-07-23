@@ -22,7 +22,7 @@
 import { cp, mkdir, readdir, rename, rm, stat, copyFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const action = process.argv[2];
@@ -30,6 +30,7 @@ const agentDirFlag = process.argv.indexOf("--agent-dir");
 const agentDir = agentDirFlag > 0 ? resolve(process.argv[agentDirFlag + 1]) : join(homedir(), ".omp", "agent");
 const sourceDir = resolve(new URL("..", import.meta.url).pathname);
 const targetDir = join(agentDir, "extensions", "resolve-vector-omp");
+const backupDir = join(agentDir, "extension-backups");
 const configTarget = join(agentDir, "resolve-vector.json");
 
 const COPY_ITEMS = ["package.json", "src", "hooks", "README.md", "resolve-vector.example.json"];
@@ -41,11 +42,32 @@ function die(message) {
 
 async function backupExisting() {
   if (!existsSync(targetDir)) return undefined;
+  await mkdir(backupDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const backup = `${targetDir}.bak-${stamp}`;
+  const backup = join(backupDir, `resolve-vector-omp.bak-${stamp}`);
   await rename(targetDir, backup);
   console.log(`backed up previous install → ${backup}`);
   return backup;
+}
+
+/** Older preview installers placed backups under extensions/, where OMP
+ * auto-discovered and loaded them as live addons. Move them out before every
+ * state-changing operation so an old command registration cannot shadow the
+ * current build. */
+async function migrateLegacyBackups() {
+  const extensionsDir = join(agentDir, "extensions");
+  const entries = existsSync(extensionsDir) ? await readdir(extensionsDir) : [];
+  const legacy = entries.filter((entry) => entry.startsWith("resolve-vector-omp.bak-"));
+  if (legacy.length === 0) return;
+  await mkdir(backupDir, { recursive: true });
+  for (const entry of legacy) {
+    const destination = join(backupDir, entry);
+    if (existsSync(destination)) {
+      die(`cannot migrate legacy backup; destination already exists: ${destination}`);
+    }
+    await rename(join(extensionsDir, entry), destination);
+    console.log(`moved auto-discovered legacy backup → ${destination}`);
+  }
 }
 
 async function copyPackage() {
@@ -112,6 +134,7 @@ async function installNatives() {
 }
 
 async function installOrUpdate(isUpdate) {
+  await migrateLegacyBackups();
   if (isUpdate && !existsSync(targetDir)) die(`no existing install at ${targetDir} — run install first`);
   await backupExisting();
   await copyPackage();
@@ -127,6 +150,7 @@ async function installOrUpdate(isUpdate) {
 }
 
 async function uninstall() {
+  await migrateLegacyBackups();
   if (!existsSync(targetDir)) die(`nothing installed at ${targetDir}`);
   await rm(targetDir, { recursive: true, force: true });
   console.log(`removed ${targetDir}`);
@@ -134,19 +158,20 @@ async function uninstall() {
 }
 
 async function rollback() {
-  const parent = join(agentDir, "extensions");
-  const entries = existsSync(parent) ? await readdir(parent) : [];
+  await migrateLegacyBackups();
+  const entries = existsSync(backupDir) ? await readdir(backupDir) : [];
   const backups = [];
   for (const entry of entries) {
     if (!entry.startsWith("resolve-vector-omp.bak-")) continue;
-    const info = await stat(join(parent, entry));
+    const info = await stat(join(backupDir, entry));
     backups.push({ entry, mtimeMs: info.mtimeMs });
   }
   if (backups.length === 0) die("no backup found to roll back to");
   backups.sort((a, b) => b.mtimeMs - a.mtimeMs);
   const latest = backups[0].entry;
   await rm(targetDir, { recursive: true, force: true });
-  await rename(join(parent, latest), targetDir);
+  await mkdir(dirname(targetDir), { recursive: true });
+  await rename(join(backupDir, latest), targetDir);
   console.log(`rolled back to ${latest} → ${targetDir}`);
 }
 

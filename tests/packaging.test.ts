@@ -72,7 +72,12 @@ test("packaged artifact: contents and install/update/rollback/uninstall cycle", 
   await writeFile(configPath, userConfig, "utf8");
   run("node", ["scripts/install.mjs", "update", "--agent-dir", agentDir], pkg);
   assert.equal(await readFile(configPath, "utf8"), userConfig, "update must not touch config");
-  const backups = (await readdir(join(agentDir, "extensions"))).filter((e) => e.startsWith("resolve-vector-omp.bak-"));
+  const extensionEntries = await readdir(join(agentDir, "extensions"));
+  assert.ok(
+    !extensionEntries.some((e) => e.startsWith("resolve-vector-omp.bak-")),
+    "rollback copies must never live in OMP's auto-discovered extensions directory",
+  );
+  const backups = (await readdir(join(agentDir, "extension-backups"))).filter((e) => e.startsWith("resolve-vector-omp.bak-"));
   assert.ok(backups.length > 0, "update must create a backup");
 
   // 5. Rollback restores the previous install.
