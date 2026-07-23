@@ -10,6 +10,7 @@ import type { ActivationMode } from "./policy.js";
 import { effectiveScope, readLedgerTimestamps } from "./policy.js";
 import { renderStatusLine, renderVerdict } from "./render.js";
 import type { RVEngine } from "./runtime.js";
+import { detailedGlmUsage, fetchGlmUsage } from "./provider-usage.js";
 
 /** Highest OMP major version RV is verified against (peer range ^17). */
 const SUPPORTED_OMP_MAJOR = 17;
@@ -215,6 +216,11 @@ async function dispatch(runtime: RVEngine, args: string, ctx: ExtensionCommandCo
     case "config":
       ctx.ui.notify(`config: ${runtime.paths.configPath}\nreceipts: ${runtime.paths.receiptsPath}`, "info");
       return;
+    case "usage": {
+      const usage = await fetchGlmUsage();
+      ctx.ui.notify(detailedGlmUsage(usage), usage.ok ? "info" : "warning");
+      return;
+    }
     case "best":
     case "fuse":
     case "compare": {
@@ -246,7 +252,7 @@ async function dispatch(runtime: RVEngine, args: string, ctx: ExtensionCommandCo
       return;
     }
     default:
-      ctx.ui.notify(`RV · unknown subcommand "${sub}". Try: status, review, on, off, config`, "warning");
+      ctx.ui.notify(`RV · unknown subcommand "${sub}". Try: status, usage, review, on, off, config`, "warning");
   }
 }
 
@@ -255,9 +261,9 @@ export function registerRvCommand(pi: ExtensionAPI, runtime: RVEngine): void {
   // the package root would eagerly load omp's native addons in plain tests.
   const ompVersion: string = (pi.pi as { VERSION?: string } | undefined)?.VERSION ?? "unknown";
   pi.registerCommand("rv", {
-    description: "Resolve Vector — cross-model review (status | doctor | review | on [mode] | off | config)",
+    description: "Resolve Vector — cross-model review (status | usage | doctor | review | on [mode] | off | config)",
     getArgumentCompletions: (prefix) => {
-      const subs = ["status", "doctor", "review", "on", "off", "config", "best", "fuse", "compare"];
+      const subs = ["status", "usage", "doctor", "review", "on", "off", "config", "best", "fuse", "compare"];
       return subs.filter((s) => s.startsWith(prefix)).map((s) => ({ label: s, value: s }));
     },
     handler: (args, ctx) => dispatch(runtime, args, ctx, ompVersion),

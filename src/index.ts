@@ -7,6 +7,7 @@ import { ActivationController, lastExchangeFromEntries, RV_CORRECTION_TYPE } fro
 import { registerRvCommand } from "./commands.js";
 import { defaultPaths, RVRuntime } from "./runtime.js";
 import { registerCouncilAuditTool } from "./tool.js";
+import { compactGlmUsage, fetchGlmUsage } from "./provider-usage.js";
 
 export default async function resolveVector(pi: ExtensionAPI): Promise<void> {
   const runtime = await RVRuntime.load(defaultPaths(getAgentDir()));
@@ -34,12 +35,23 @@ export default async function resolveVector(pi: ExtensionAPI): Promise<void> {
     primaryFamily: (ctx) => (ctx.model ? ctx.models.family(ctx.model) : undefined),
   });
 
+  const refreshUsage = async (ctx: { model?: { provider: string }; ui: { setStatus(key: string, text: string | undefined): void } }) => {
+    if (ctx.model?.provider !== "zai-proxy") {
+      ctx.ui.setStatus("rv-glm-usage", undefined);
+      return;
+    }
+    const usage = await fetchGlmUsage();
+    ctx.ui.setStatus("rv-glm-usage", compactGlmUsage(usage));
+  };
+
   // Fire-and-forget: reviews run in the background; onAgentEnd never throws.
   pi.on("agent_end", (event, ctx) => {
     void activation.onAgentEnd(event.messages, ctx);
+    void refreshUsage(ctx);
   });
   pi.on("session_start", (_event, ctx) => {
     activation.reset();
+    void refreshUsage(ctx);
     if (runtime.configErrors.length > 0) {
       ctx.ui.notify(
         `RV · config errors in ${runtime.paths.configPath}:\n${runtime.configErrors.join("\n")}`,
@@ -49,5 +61,8 @@ export default async function resolveVector(pi: ExtensionAPI): Promise<void> {
       ctx.ui.notify(`RV · installed, no reviewers configured — see ${runtime.paths.configPath}`, "info");
     }
   });
-  pi.on("session_switch", () => activation.reset());
+  pi.on("session_switch", (_event, ctx) => {
+    activation.reset();
+    void refreshUsage(ctx);
+  });
 }
