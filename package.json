@@ -4,6 +4,14 @@
   "description": "Cross-model reasoning, review, and synthesis for Oh My Pi.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nighthwk77/resolve-vector-omp.git"
+  },
+  "homepage": "https://github.com/Nighthwk77/resolve-vector-omp#readme",
+  "bugs": {
+    "url": "https://github.com/Nighthwk77/resolve-vector-omp/issues"
+  },
   "omp": {
     "extensions": [
       "./src/index.ts"

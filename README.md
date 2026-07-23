@@ -64,7 +64,7 @@ turns by unique id, and coalesces overlapping completions.
 ## Install (preview)
 
 ```bash
-git clone https://github.com/<owner>/resolve-vector-omp.git && cd resolve-vector-omp
+git clone https://github.com/Nighthwk77/resolve-vector-omp.git && cd resolve-vector-omp
 npm install
 npm run install-preview          # installs into ~/.omp/agent/extensions/
 ```
