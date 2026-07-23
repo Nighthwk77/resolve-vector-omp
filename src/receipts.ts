@@ -49,7 +49,7 @@ export interface ReviewerReceipt {
   model: string;
   family: string;
   local: boolean;
-  status: "ok" | "skipped_budget" | "skipped_same_family" | "error" | "timeout";
+  status: "ok" | "skipped_budget" | "skipped_same_family" | "skipped_policy" | "error" | "timeout";
   /** Provider calls made: 1 normally, 2 when the repair retry fired. Budget accounting uses this. */
   calls?: number;
   verdict?: VerdictStatus;
@@ -74,7 +74,7 @@ export interface CandidateReceipt {
   model: string;
   family: string;
   local: boolean;
-  status: "ok" | "skipped_budget" | "skipped_same_family" | "error" | "timeout";
+  status: "ok" | "skipped_budget" | "skipped_same_family" | "skipped_policy" | "error" | "timeout";
   calls?: number;
   latencyMs: number;
   usage?: { input?: number; output?: number };
@@ -110,6 +110,8 @@ export interface ReviewReceipt {
   sessionId?: string;
   turnId?: string;
   activationReason: "manual_command" | "tool_call" | "agent_end" | "revision";
+  /** Deterministic activation signal that fired (e.g. files_changed, always, sample:0.031). */
+  activationDetail?: string;
   revisionRound: number;
   primaryFamily?: string;
   verdict: CouncilVerdict;

@@ -41,8 +41,14 @@ export interface TurnAnalysis {
   substantive: boolean;
   /** Last assistant text of the turn (the proposal under review). */
   proposal?: string;
+  /** Last user text of the turn (for explicit verify requests). */
+  userText?: string;
   /** A mutating tool ran this turn (edit/write/bash). */
   filesChanged: boolean;
+  /** A read-only research tool ran (read/grep/glob) → claims may rest on inspected sources. */
+  researchToolsUsed: boolean;
+  /** A council_audit ensemble ran this turn → output needs final verification. */
+  ensembleOutput: boolean;
   /** Turn contains an rv-correction marker → RV triggered it. */
   isReviewTurn: boolean;
   /** Unique id of the correction this turn answers, if marked. */
@@ -60,13 +66,21 @@ export interface ActivationDeps {
 }
 
 const MIN_SUBSTANTIVE_CHARS = 40;
-const AUTO_LONG_ANSWER_CHARS = 500;
 const MUTATING_TOOLS: Record<string, true> = { edit: true, write: true, bash: true };
+const RESEARCH_TOOLS: Record<string, true> = { read: true, grep: true, glob: true };
+
+// Deterministic consequence signals (auto mode). Cheap regexes on the turn's
+// own text — never model self-confidence.
+const COMPLETION_RE = /\b(done|complete[ds]?|finished|implemented|fixed|ready to ship|all set)\b/i;
+const DIAGNOSIS_RE = /\b(root cause|caused by|the (bug|issue|problem|failure|culprit) (is|was|lies)|the fix (is|was) to)\b/i;
+const RECOMMEND_RE = /\b(i recommend|my recommendation|you should|the best (option|approach|choice)|decision:|i'd go with|i suggest)\b/i;
+const VERIFY_RE = /\b(verify|audit|double[- ]?check|sanity[- ]?check|check (this|my|the|your)|review (this|my|the|your))\b/i;
+const GREETING_RE = /^(hi|hello|hey|thanks|thank you|ok|okay|yes|no|sure|great|nice|got it|lol)\b/i;
 
 function messageText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    return content
+    const text = content
       .filter(
         (block): block is { type: "text"; text: string } =>
           typeof block === "object" &&
@@ -77,6 +91,22 @@ function messageText(content: unknown): string {
           typeof block.text === "string",
       )
       .map((block) => block.text)
+      .join("");
+    if (text.trim().length > 0) return text;
+    // Transport quirk (vllm-mlx): some servers return the entire reply as
+    // reasoning_content with empty content. When there is no text at all,
+    // the thinking payload IS the answer the user saw — use it.
+    return content
+      .filter(
+        (block): block is { type: "thinking"; thinking: string } =>
+          typeof block === "object" &&
+          block !== null &&
+          "type" in block &&
+          block.type === "thinking" &&
+          "thinking" in block &&
+          typeof block.thinking === "string",
+      )
+      .map((block) => block.thinking)
       .join("");
   }
   return "";
@@ -105,7 +135,10 @@ export function lastExchangeFromEntries(entries: readonly SessionEntry[]): { goa
  */
 export function analyzeTurn(messages: readonly unknown[]): TurnAnalysis {
   let proposal: string | undefined;
+  let userText: string | undefined;
   let filesChanged = false;
+  let researchToolsUsed = false;
+  let ensembleOutput = false;
   let isReviewTurn = false;
   let correctionId: string | undefined;
   for (const message of messages) {
@@ -122,31 +155,85 @@ export function analyzeTurn(messages: readonly unknown[]): TurnAnalysis {
       const text = messageText(message.content).trim();
       if (text.length > 0) proposal = text;
     }
-    if (message.role === "toolResult" && "toolName" in message && typeof message.toolName === "string") {
-      if (MUTATING_TOOLS[message.toolName]) filesChanged = true;
+    if (message.role === "user" && "content" in message) {
+      const text = messageText(message.content).trim();
+      if (text.length > 0) userText = text;
+    }
+    if (message.role === "toolResult") {
+      if ("toolName" in message && typeof message.toolName === "string") {
+        if (MUTATING_TOOLS[message.toolName]) filesChanged = true;
+        if (RESEARCH_TOOLS[message.toolName]) researchToolsUsed = true;
+        if (message.toolName === "council_audit") ensembleOutput = true;
+      }
+      // council_audit is also reached through the xd:// write-device wrapper;
+      // its details carry the real tool under xdev.
+      if (
+        "details" in message &&
+        typeof message.details === "object" &&
+        message.details !== null &&
+        "xdev" in message.details &&
+        typeof message.details.xdev === "object" &&
+        message.details.xdev !== null &&
+        "tool" in message.details.xdev &&
+        message.details.xdev.tool === "council_audit"
+      ) {
+        ensembleOutput = true;
+      }
     }
   }
   const substantive = (proposal !== undefined && proposal.length >= MIN_SUBSTANTIVE_CHARS) || filesChanged;
-  return { substantive, proposal, filesChanged, isReviewTurn, correctionId };
+  return { substantive, proposal, userText, filesChanged, researchToolsUsed, ensembleOutput, isReviewTurn, correctionId };
 }
 
-/** Mode policy. auto = initial deterministic heuristic per brief §5 (files changed or a long consequential answer). */
+export interface ActivationDecision {
+  activate: boolean;
+  /** Deterministic reason tag recorded on the receipt (heuristic tuning data). */
+  reason?: string;
+}
+
+/** Trivial turns the auto policy must NOT review. */
+function isAvoidableTurn(turn: TurnAnalysis): boolean {
+  const proposal = turn.proposal ?? "";
+  // Greetings / acknowledgments.
+  if (proposal.length > 0 && proposal.length < 120 && GREETING_RE.test(proposal)) return true;
+  // Clarification questions back to the user (no work completed).
+  if (!turn.filesChanged && proposal.length > 0 && proposal.length < 400 && proposal.trimEnd().endsWith("?")) return true;
+  return false;
+}
+
+/**
+ * Mode policy. auto = deterministic consequence signals (files changed,
+ * completion claimed, diagnosis, recommendation, source report, explicit
+ * verify request, ensemble output) — never answer length or self-confidence.
+ */
 export function shouldActivate(
   config: ResolveVectorConfig,
   turn: TurnAnalysis,
   rng: () => number,
-): boolean {
-  if (!turn.substantive || turn.isReviewTurn) return false;
+): ActivationDecision {
+  if (!turn.substantive || turn.isReviewTurn) return { activate: false };
   switch (config.mode as ActivationMode) {
     case "off":
     case "manual":
-      return false;
+      return { activate: false };
     case "always":
-      return true;
-    case "sample":
-      return rng() < config.sampleRate;
-    case "auto":
-      return turn.filesChanged || (turn.proposal !== undefined && turn.proposal.length >= AUTO_LONG_ANSWER_CHARS);
+      return { activate: true, reason: "always" };
+    case "sample": {
+      const roll = rng();
+      return { activate: roll < config.sampleRate, reason: `sample:${roll.toFixed(3)}` };
+    }
+    case "auto": {
+      if (isAvoidableTurn(turn)) return { activate: false };
+      if (turn.filesChanged) return { activate: true, reason: "files_changed" };
+      if (turn.ensembleOutput) return { activate: true, reason: "ensemble_verification" };
+      if (turn.userText && VERIFY_RE.test(turn.userText)) return { activate: true, reason: "user_requested" };
+      const proposal = turn.proposal ?? "";
+      if (COMPLETION_RE.test(proposal)) return { activate: true, reason: "completion_claim" };
+      if (DIAGNOSIS_RE.test(proposal)) return { activate: true, reason: "diagnosis" };
+      if (RECOMMEND_RE.test(proposal)) return { activate: true, reason: "recommendation" };
+      if (turn.researchToolsUsed) return { activate: true, reason: "source_report" };
+      return { activate: false };
+    }
   }
 }
 
@@ -238,7 +325,8 @@ export class ActivationController {
       return;
     }
 
-    if (!shouldActivate(config, turn, this.deps.rng ?? Math.random)) return;
+    const decision = shouldActivate(config, turn, this.deps.rng ?? Math.random);
+    if (!decision.activate) return;
     if (this.state.reviewing) {
       // Coalesce: keep only the newest completion for after the current review.
       this.state.pendingTurn = { reason: "agent_end" };
@@ -248,16 +336,17 @@ export class ActivationController {
     const leaf = this.deps.leafEntryId(ctx);
     if (leaf !== undefined && leaf === this.state.lastReviewedEntryId) return; // never twice
 
-    await this.reviewCurrentAnswer(ctx, "agent_end", leaf);
+    await this.reviewCurrentAnswer(ctx, "agent_end", leaf, decision.reason);
   }
 
   private async reviewCurrentAnswer(
     ctx: ExtensionContext,
     reason: "agent_end" | "revision",
     leaf?: string,
+    activationDetail?: string,
   ): Promise<void> {
     const gen = this.generation;
-    let current: { reason: "agent_end" | "revision"; leaf?: string } = { reason, leaf };
+    let current: { reason: "agent_end" | "revision"; leaf?: string; detail?: string } = { reason, leaf, detail: activationDetail };
     this.state.reviewing = true;
     const controller = new AbortController();
     this.inFlight = controller;
@@ -273,6 +362,7 @@ export class ActivationController {
             proposal,
             primaryFamily: this.deps.primaryFamily(ctx),
             activationReason: current.reason,
+            activationDetail: current.detail ?? (current.reason === "revision" ? "revision" : undefined),
             revisionRound: this.state.revisionRound,
           },
           controller.signal,

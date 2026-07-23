@@ -45,6 +45,7 @@ export interface RunReviewRequest {
   constraints?: string[];
   primaryFamily?: string;
   activationReason: ReviewReceipt["activationReason"];
+  activationDetail?: string;
   revisionRound?: number;
 }
 
@@ -132,6 +133,7 @@ export class RVRuntime implements RVEngine {
     const receipt: ReviewReceipt = {
       receiptId: verdict.id,
       activationReason: request.activationReason,
+      activationDetail: request.activationDetail,
       revisionRound: request.revisionRound ?? 0,
       primaryFamily: request.primaryFamily,
       verdict,

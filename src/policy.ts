@@ -11,6 +11,18 @@ export type CouncilMode = "review" | "best" | "fusion" | "compare";
 export type ReviewerRole = "critic" | "verifier" | "method" | "judge" | "fusion";
 export type ReviewerTrigger = "always" | "escalation" | "sample";
 
+/**
+ * Privacy scope for a reviewer seat:
+ * - local-only: content never leaves the machine. An external seat with this
+ *   scope is skipped by policy (fail closed).
+ * - external-redacted: content may go to the external endpoint AFTER secret
+ *   redaction. Default for external seats. Redaction is a mitigation, not a
+ *   complete privacy boundary.
+ * - external-allowed: full content may go to the external endpoint, no
+ *   redaction. Explicit opt-in for trusted endpoints.
+ */
+export type ReviewerScope = "local-only" | "external-allowed" | "external-redacted";
+
 /** One council seat. `provider`/`model` resolve through omp's model registry. */
 export interface ReviewerConfig {
   id: string;
@@ -23,6 +35,12 @@ export interface ReviewerConfig {
   enabled: boolean;
   order: number;
   trigger?: ReviewerTrigger;
+  scope?: ReviewerScope;
+}
+
+/** Effective scope: explicit config wins; local defaults local-only, external defaults external-redacted. */
+export function effectiveScope(reviewer: ReviewerConfig): ReviewerScope {
+  return reviewer.scope ?? (reviewer.local ? "local-only" : "external-redacted");
 }
 
 export interface ResolveVectorConfig {
@@ -57,6 +75,7 @@ const ACTIVATION_MODES: Record<ActivationMode, true> = { off: true, manual: true
 const COUNCIL_MODES: Record<CouncilMode, true> = { review: true, best: true, fusion: true, compare: true };
 const REVIEWER_ROLES: Record<ReviewerRole, true> = { critic: true, verifier: true, method: true, judge: true, fusion: true };
 const REVIEWER_TRIGGERS: Record<ReviewerTrigger, true> = { always: true, escalation: true, sample: true };
+const REVIEWER_SCOPES: Record<ReviewerScope, true> = { "local-only": true, "external-allowed": true, "external-redacted": true };
 
 export interface ConfigLoadResult {
   config: ResolveVectorConfig;
@@ -98,6 +117,10 @@ function validateReviewer(raw: unknown, index: number): { reviewer?: ReviewerCon
   if (trigger !== undefined && (typeof trigger !== "string" || !REVIEWER_TRIGGERS[trigger as ReviewerTrigger])) {
     errors.push(`${at}.trigger: must be one of ${Object.keys(REVIEWER_TRIGGERS).join(", ")}`);
   }
+  const scope = raw.scope;
+  if (scope !== undefined && (typeof scope !== "string" || !REVIEWER_SCOPES[scope as ReviewerScope])) {
+    errors.push(`${at}.scope: must be one of ${Object.keys(REVIEWER_SCOPES).join(", ")}`);
+  }
   if (errors.length > 0 || !id || !provider || !model || !family) return { errors };
   return {
     reviewer: {
@@ -110,6 +133,7 @@ function validateReviewer(raw: unknown, index: number): { reviewer?: ReviewerCon
       enabled: raw.enabled !== false,
       order,
       trigger: trigger as ReviewerTrigger | undefined,
+      scope: scope as ReviewerScope | undefined,
     },
     errors: [],
   };
@@ -292,6 +316,28 @@ interface LedgerEntry {
 
 const LOCK_STALE_MS = 30_000;
 const LOCK_TIMEOUT_MS = 10_000;
+
+/** All reservation timestamps in a ledger file (for usage display). Tolerates a missing/corrupt file. */
+export async function readLedgerTimestamps(ledgerPath: string): Promise<number[]> {
+  let text: string;
+  try {
+    text = await readFile(ledgerPath, "utf8");
+  } catch {
+    return [];
+  }
+  const timestamps: number[] = [];
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as { at?: unknown };
+      if (typeof parsed.at === "number") timestamps.push(parsed.at);
+    } catch {
+      // skip corrupt lines
+    }
+  }
+  return timestamps;
+}
 
 /**
  * Cross-process budget ledger. The ledger file is the single source of truth

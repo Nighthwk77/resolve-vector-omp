@@ -135,6 +135,13 @@ test("analyzeTurn: substantive text, tool mutations, correction markers and ids"
   assert.equal(long.substantive, true);
   assert.equal(long.filesChanged, false);
 
+  // vllm-mlx quirk: the whole reply arrives as thinking with empty text.
+  const thinkingOnly = analyzeTurn([
+    { role: "assistant", content: [{ type: "thinking", thinking: "x".repeat(60) }] },
+  ]);
+  assert.equal(thinkingOnly.substantive, true);
+  assert.equal(thinkingOnly.proposal, "x".repeat(60));
+
   const edited = analyzeTurn([
     { role: "toolResult", toolName: "edit", content: [] },
     { role: "assistant", content: [{ type: "text", text: "ok" }] },
@@ -152,23 +159,67 @@ test("analyzeTurn: substantive text, tool mutations, correction markers and ids"
 });
 
 test("shouldActivate honors every mode", () => {
-  const turn = { substantive: true, proposal: "p".repeat(600), filesChanged: false, isReviewTurn: false };
+  const turn: Parameters<typeof shouldActivate>[1] = {
+    substantive: true,
+    proposal: "Implemented the full migration and fixed the callers.",
+    filesChanged: false,
+    researchToolsUsed: false,
+    ensembleOutput: false,
+    isReviewTurn: false,
+  };
   const base = { ...DEFAULT_CONFIG, reviewers: [] };
-  assert.equal(shouldActivate({ ...base, mode: "off" }, turn, () => 0), false);
-  assert.equal(shouldActivate({ ...base, mode: "manual" }, turn, () => 0), false);
-  assert.equal(shouldActivate({ ...base, mode: "always" }, turn, () => 0.9), true);
-  assert.equal(shouldActivate({ ...base, mode: "sample", sampleRate: 0.1 }, turn, () => 0.05), true);
-  assert.equal(shouldActivate({ ...base, mode: "sample", sampleRate: 0.1 }, turn, () => 0.5), false);
-  assert.equal(shouldActivate({ ...base, mode: "auto" }, turn, () => 0), true); // long answer
-  assert.equal(
-    shouldActivate({ ...base, mode: "auto" }, { ...turn, proposal: "short-ish", filesChanged: true }, () => 0),
-    true,
-  ); // mutation
-  assert.equal(
-    shouldActivate({ ...base, mode: "auto" }, { ...turn, proposal: "short-ish", filesChanged: false }, () => 0),
-    false,
-  );
-  assert.equal(shouldActivate({ ...base, mode: "always" }, { ...turn, isReviewTurn: true }, () => 0), false);
+  assert.equal(shouldActivate({ ...base, mode: "off" }, turn, () => 0).activate, false);
+  assert.equal(shouldActivate({ ...base, mode: "manual" }, turn, () => 0).activate, false);
+  assert.equal(shouldActivate({ ...base, mode: "always" }, turn, () => 0.9).activate, true);
+  assert.equal(shouldActivate({ ...base, mode: "always" }, turn, () => 0.9).reason, "always");
+  assert.equal(shouldActivate({ ...base, mode: "sample", sampleRate: 0.1 }, turn, () => 0.05).activate, true);
+  assert.equal(shouldActivate({ ...base, mode: "sample", sampleRate: 0.1 }, turn, () => 0.5).activate, false);
+  assert.equal(shouldActivate({ ...base, mode: "always" }, { ...turn, isReviewTurn: true }, () => 0).activate, false);
+});
+
+test("auto mode fires on deterministic consequence signals, not length", () => {
+  const base = { ...DEFAULT_CONFIG, mode: "auto" as const, reviewers: [] };
+  const dry = { substantive: true, filesChanged: false, researchToolsUsed: false, ensembleOutput: false, isReviewTurn: false };
+  const activate = (turn: Partial<Parameters<typeof shouldActivate>[1]>) =>
+    shouldActivate(base, { ...dry, ...turn } as Parameters<typeof shouldActivate>[1], () => 0);
+
+  // Each consequence signal fires with its reason tag.
+  assert.deepEqual(activate({ filesChanged: true }), { activate: true, reason: "files_changed" });
+  assert.deepEqual(activate({ ensembleOutput: true }), { activate: true, reason: "ensemble_verification" });
+  assert.deepEqual(activate({ userText: "please verify this migration" }), { activate: true, reason: "user_requested" });
+  assert.deepEqual(activate({ proposal: "Implemented the retry logic and fixed the tests." }), {
+    activate: true,
+    reason: "completion_claim",
+  });
+  assert.deepEqual(activate({ proposal: "The root cause is a stale cache; the fix is to invalidate on write." }), {
+    activate: true,
+    reason: "diagnosis",
+  });
+  assert.deepEqual(activate({ proposal: "I recommend postgres over sqlite for this workload." }), {
+    activate: true,
+    reason: "recommendation",
+  });
+  assert.deepEqual(activate({ researchToolsUsed: true, proposal: "The config loader reads yaml then env overrides." }), {
+    activate: true,
+    reason: "source_report",
+  });
+
+  // Length alone is NOT a signal anymore.
+  assert.equal(activate({ proposal: "x".repeat(600) }).activate, false);
+  // Neutral short statement: no consequence signal.
+  assert.equal(activate({ proposal: "The file lives under src/tools today." }).activate, false);
+});
+
+test("auto mode avoids trivial turns", () => {
+  const base = { ...DEFAULT_CONFIG, mode: "auto" as const, reviewers: [] };
+  const dry = { substantive: true, filesChanged: false, researchToolsUsed: false, ensembleOutput: false, isReviewTurn: false };
+  const activate = (turn: Partial<Parameters<typeof shouldActivate>[1]>) =>
+    shouldActivate(base, { ...dry, ...turn } as Parameters<typeof shouldActivate>[1], () => 0).activate;
+
+  assert.equal(activate({ proposal: "Thanks!" }), false); // acknowledgment
+  assert.equal(activate({ proposal: "Which database should I use for the migration?" }), false); // clarification question
+  assert.equal(activate({ isReviewTurn: true, proposal: "x".repeat(100) }), false); // RV's own turn
+  assert.equal(activate({ substantive: false, proposal: "Done." }), false); // not substantive
 });
 
 test("always mode reviews a substantive turn; pass renders verified, no correction", async () => {

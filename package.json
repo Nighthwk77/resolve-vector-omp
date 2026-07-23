@@ -1,17 +1,38 @@
 {
   "name": "resolve-vector-omp",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.2.0",
   "description": "Cross-model reasoning, review, and synthesis for Oh My Pi.",
   "type": "module",
+  "license": "MIT",
   "omp": {
     "extensions": [
       "./src/index.ts"
     ]
   },
+  "files": [
+    "src",
+    "hooks",
+    "README.md",
+    "resolve-vector.example.json"
+  ],
+  "peerDependencies": {
+    "@oh-my-pi/pi-coding-agent": "^17.0.7"
+  },
+  "peerDependenciesMeta": {
+    "@oh-my-pi/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-ai": "^17.0.7"
+  },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "install-preview": "node scripts/install.mjs install",
+    "update-preview": "node scripts/install.mjs update",
+    "uninstall-preview": "node scripts/install.mjs uninstall",
+    "rollback-preview": "node scripts/install.mjs rollback"
   },
   "devDependencies": {
     "@oh-my-pi/pi-coding-agent": "^17.0.7",

@@ -23,7 +23,7 @@ import {
 } from "./judge.js";
 import { buildFusionPrompt, FUSION_SYSTEM_PROMPT, parseFusionPlan } from "./fusion.js";
 import type { BudgetCoordinator, BudgetDecision, ResolveVectorConfig, ReviewerConfig } from "./policy.js";
-import { checkExternalBudget } from "./policy.js";
+import { checkExternalBudget, effectiveScope } from "./policy.js";
 import type { ResolveResult, ResolvedReviewer, ReviewerOutput } from "./providers.js";
 import type { CandidateReceipt, CheckReceipt, CouncilVerdict, EvidenceItem, Finding, ReviewerReceipt, VerdictStatus } from "./receipts.js";
 import { newReceiptId, redactSecrets } from "./receipts.js";
@@ -105,8 +105,11 @@ async function reviewWith(
     family: resolved.family,
     local: resolved.config.local,
   };
-  // Secrets never cross the external transport boundary, even inside prompts.
-  const transportPrompt = resolved.config.local ? buildReviewPrompt(input) : redactSecrets(buildReviewPrompt(input));
+  // Privacy: secrets are redacted before external transport UNLESS the seat
+  // is explicitly external-allowed. Local seats never leave the machine.
+  const scope = effectiveScope(resolved.config);
+  const rawPrompt = buildReviewPrompt(input);
+  const transportPrompt = resolved.config.local || scope === "external-allowed" ? rawPrompt : redactSecrets(rawPrompt);
   let calls = 0;
   // Every external call — the initial attempt included — is budget-reserved
   // BEFORE dispatch.
@@ -268,6 +271,17 @@ async function prepareSeats(
       );
       continue;
     }
+    // Privacy policy: a local-only seat that is external never receives content.
+    if (!reviewerConfig.local && effectiveScope(reviewerConfig) === "local-only") {
+      receipts.push(
+        skippedReceipt(
+          reviewerConfig,
+          "skipped_policy",
+          "scope is local-only but the seat is external; content never leaves the machine by policy",
+        ),
+      );
+      continue;
+    }
     runnable.push(result.reviewer);
   }
   return { runnable, receipts };
@@ -363,7 +377,7 @@ async function callSeat(
     const decision = await reserve();
     if (!decision.allowed) throw new BudgetExceeded(decision.reason ?? "budget reached");
   }
-  const prompt = seat.config.local ? rawPrompt : redactSecrets(rawPrompt);
+  const prompt = seat.config.local || effectiveScope(seat.config) === "external-allowed" ? rawPrompt : redactSecrets(rawPrompt);
   const t0 = started();
   try {
     const output = await deps.complete(seat, systemPrompt, prompt, deps.signal);

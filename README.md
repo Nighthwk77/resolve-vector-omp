@@ -1,43 +1,95 @@
 # Resolve Vector for OMP
 
-Resolve Vector is a cross-model reasoning addon for Oh My Pi. It reviews,
-compares, and synthesizes model outputs without opening or focusing external
-application windows.
+Resolve Vector (RV) is a free, open-source, vendor-neutral reasoning and
+verification addon for [Oh My Pi](https://github.com/can1357/oh-my-pi) (omp).
+It reviews your agent's completed work with a **different model family** —
+because same-family models share blind spots, and cross-family reviewers catch
+errors the primary model literally cannot see.
 
-This repository is the clean implementation workspace for the OMP pivot. The
-product and engineering specifications are in [`docs/`](./docs/).
+Everything runs **headless**: no browser windows, no focused apps, no external
+UIs. Reviews appear as compact status lines inside omp.
 
-## Initial target
+## What it does
 
-The first vertical slice will provide:
+- **review** — one completed answer is challenged by a different-family
+  reviewer. You get specific claims challenged, evidence, severity, and a
+  suggested correction — not a generic second opinion.
+- **best-of-N** (`/rv best`) — N independent candidates are generated in
+  isolation (no cross-anchoring), anonymized, shuffled, checked
+  deterministically, then scored blind. The judge never learns which model
+  wrote which candidate. A candidate that fails an objective check cannot win
+  on prose.
+- **fuse** (`/rv fuse`) — conflict-aware synthesis: agreements are kept,
+  every material conflict is resolved with evidence or left **explicitly
+  unresolved**, and the fused answer passes a final independent review.
+- **compare** (`/rv compare`) — shows alternatives with tradeoffs and
+  unresolved conflicts. Never auto-selects when the choice is yours.
 
-- `/rv review` for explicit review;
-- automatic review at the completion boundary;
-- one local OpenAI-compatible provider and one remote API provider;
-- concise visible status and a durable JSONL receipt;
-- loop guards so Resolve Vector never reviews its own corrective turn.
+All modes run through the same engine and write durable JSONL receipts.
 
-See [`docs/RV_OMP_ADDON_IMPLEMENTATION_BRIEF_2026-07-22.md`](./docs/RV_OMP_ADDON_IMPLEMENTATION_BRIEF_2026-07-22.md)
-for the complete implementation contract.
+## Automatic review and the corrective loop
 
-## Development
+With `mode: "always"` (or `"auto"`/`"sample"`), every substantive completion
+is reviewed automatically:
+
+1. The answer is labeled **provisional** while the review runs.
+2. `pass` → marked verified.
+3. `concern`/`fail` → a hidden corrective message is injected and the primary
+   agent revises; the revision is reviewed once more, bounded by
+   `maxRevisionRounds`.
+4. **`split` means the reviewers disagree and RV takes no side** — the loop
+   stops, the competing conclusions are shown, and the decision is yours.
+   RV never silently picks a winner or asks the model to revise toward one
+   side.
+5. Unresolved loops stop and escalate to you.
+
+Loop safety: RV never reviews its own turns, never reviews the same entry
+twice, aborts in-flight reviews on session switch, correlates corrective
+turns by unique id, and coalesces overlapping completions.
+
+## Privacy
+
+- **Local reviewers are the default posture** — content never leaves the
+  machine. The starter config is local-only.
+- Every reviewer has a scope: `local-only` (external seats blocked by
+  policy), `external-redacted` (secrets redacted before transport — the
+  external default), `external-allowed` (full content, explicit trust).
+- **Redaction is a mitigation, not a complete privacy boundary.** Context,
+  structure, and intent still leak to external endpoints. `/rv status` shows
+  exactly which seats receive what.
+- External calls are budgeted (`maxExternalAuditsPerHour`/`...Day`), enforced
+  by a cross-process ledger, and every attempt counts — including failures
+  and retries. Skipped-by-policy seats fail closed and are shown in receipts.
+
+## Install (preview)
 
 ```bash
+git clone <this-repo> && cd resolve-vector-omp
 npm install
-npm run check   # typecheck
-npm test        # bun test (31 tests across policy, council, receipts, domain)
+npm run install-preview          # installs into ~/.omp/agent/extensions/
 ```
 
-OMP discovers the extension from `src/index.ts` using the `omp.extensions`
-entry in `package.json`, or ad hoc via `omp -e ./src/index.ts`.
+Then restart omp and run `/rv doctor`. To try it: `/rv review`, or set
+`"mode": "always"` in `~/.omp/agent/resolve-vector.json`.
+
+```bash
+npm run update-preview           # newer code; your config is never touched
+npm run uninstall-preview        # removes the package; config/receipts stay
+npm run rollback-preview         # restores the previous install
+```
+
+The installer never overwrites an existing `resolve-vector.json`.
+Supported omp: **^17.0.7** (peer dependency; `/rv doctor` verifies).
 
 ## Configuration
 
-RV reads `~/.omp/agent/resolve-vector.json` (created by you, not by RV):
+`~/.omp/agent/resolve-vector.json` (see `resolve-vector.example.json`):
 
 ```json
 {
   "mode": "manual",
+  "maxExternalAuditsPerHour": 10,
+  "maxExternalAuditsPerDay": 50,
   "reviewers": [
     {
       "id": "local-qwen",
@@ -46,47 +98,83 @@ RV reads `~/.omp/agent/resolve-vector.json` (created by you, not by RV):
       "family": "qwen",
       "role": "critic",
       "local": true,
+      "scope": "local-only",
       "enabled": true,
       "order": 1
+    },
+    {
+      "id": "glm-proxy",
+      "provider": "zai-proxy",
+      "model": "glm-5.1",
+      "family": "glm",
+      "role": "verifier",
+      "local": true,
+      "scope": "local-only",
+      "enabled": false,
+      "order": 2
+    },
+    {
+      "id": "remote-kimi",
+      "provider": "kimi-code",
+      "model": "kimi-for-coding",
+      "family": "moonshot",
+      "role": "verifier",
+      "local": false,
+      "scope": "external-redacted",
+      "enabled": false,
+      "order": 3
     }
   ]
 }
 ```
 
-`provider`/`model` resolve through OMP's own model registry — reviewers use the
-same authenticated providers the session already trusts. Family diversity is
-checked live against the catalog: a reviewer from the primary model's family
-is skipped, never consulted.
+`provider`/`model` resolve through omp's own model registry — reviewers use
+the same authenticated providers your session already trusts. Family
+diversity is checked live against the model catalog: a reviewer from the
+primary model's family is skipped, never consulted.
 
-Verdicts append to `~/.omp/agent/resolve-vector.receipts.jsonl` (secrets
-redacted before write). `/rv status` reads mode, roster, budgets, and recent
-verdicts from these receipts.
+## Commands
 
-## Status
+| Command | What it does |
+| --- | --- |
+| `/rv review` | Review the last answer with the council |
+| `/rv best [n]` / `fuse [n]` / `compare [n]` | Ensemble modes over n candidates |
+| `/rv on [auto\|always\|sample]` / `/rv off` | Automatic review at completion (session-scoped) |
+| `/rv status` | Mode, roster, content recipients, budget remaining, recent verdicts |
+| `/rv doctor` | Actionable health checks (models, credentials, endpoints, paths, privacy, omp version) |
+| `/rv config` | Config and receipt file locations |
 
-Milestones 1–2 work and are smoke-tested end to end:
+The model-callable `council_audit` tool exposes the same engine to the agent
+itself.
 
-- **M1 (vertical slice):** `/rv review` and the model-callable `council_audit`
-  tool run a real cross-family review (GLM primary → local Qwen reviewer) with
-  a typed verdict and durable receipt. External-call budgets are enforced by a
-  cross-process ledger (`resolve-vector.budget.jsonl`) with owner-token locks.
-- **M2 (automatic revision):** with `mode: "always"`, every substantive
-  `agent_end` is reviewed automatically. The answer is labeled provisional
-  while the review runs; a concern/fail injects a hidden `nextTurn`
-  corrective message and the revision is reviewed again, bounded by
-  `maxRevisionRounds`. Recursion guards prevent RV from reviewing its own
-  turns, the same entry twice, or two reviews at once. Unresolved loops stop
-  and hand the decision to the user.
-- **M2.1 (lifecycle hardening):** reviews carry a session generation —
-  `session_start`/`session_switch` aborts the in-flight review and
-  invalidates its side effects; corrections carry unique IDs so only the
-  correlated turn consumes the revision state; overlapping completions are
-  coalesced into a one-item pending slot (newest wins) instead of being
-  dropped.
+## Troubleshooting
 
-`best`/`fusion`/`compare` are live (M3): candidates generate independently
-from the reviewer roster, judging is blind (anonymized + shuffled, seat
-identity never reaches the judge), deterministic checks disqualify before
-scores are compared, fusion preserves unresolved conflicts and passes a final
-independent review. `/rv best|fuse|compare [count]` and `council_audit` modes
-share the same engine.
+- **No reviewers configured** → copy `resolve-vector.example.json` to
+  `~/.omp/agent/resolve-vector.json` and adjust; run `/rv doctor`.
+- **`review_unavailable`** → check `/rv status`: seats may be skipped by
+  family-diversity, privacy scope, or budget. Reasons are in the receipt.
+- **Local endpoint unreachable** → start your local server (vllm-mlx /
+  Ollama / LM Studio) and re-run `/rv doctor`.
+- **External budget exhausted** → wait for the window or raise the caps;
+  usage shows in `/rv status`.
+
+## Preview limitations
+
+- Ensemble deterministic checks are a pipeline hook; the generic profile
+  ships no domain checks yet (source-faithfulness is deliberately deferred —
+  RV is a general reasoning system, not a porting tool).
+- Escalation-trigger seats are parsed but stay cold.
+- `auto` activation uses deterministic text/tool signals; it will over- and
+  under-fire. Receipts record the firing reason (`activationDetail`) so the
+  heuristic can be tuned from real use.
+- `/rv on` changes are session-scoped, not persisted.
+
+## Development
+
+```bash
+npm install
+npm run check   # typecheck
+npm test        # bun test
+```
+
+The product and engineering specifications are in [`docs/`](./docs/).

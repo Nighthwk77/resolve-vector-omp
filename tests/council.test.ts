@@ -204,6 +204,49 @@ test("runCouncil never calls disabled or escalation-trigger seats", async () => 
   assert.equal(verdict.reviewers.length, 1);
 });
 
+test("policy: an external seat with local-only scope is skipped and fails closed", async () => {
+  const blocked = { ...reviewerB, scope: "local-only" as const };
+  const prompts: string[] = [];
+  const deps: CouncilDeps = {
+    resolveReviewer: async (config) => okResolution(config),
+    complete: async (_resolved, _s, prompt) => {
+      prompts.push(prompt);
+      return { text: passJson() };
+    },
+  };
+  const verdict = await runCouncil({
+    ...baseInput,
+    config: configWith([blocked]),
+    deps,
+  });
+  assert.equal(prompts.length, 0, "local-only external seat must never receive content");
+  assert.equal(verdict.reviewers[0].status, "skipped_policy");
+  assert.match(verdict.reviewers[0].error ?? "", /local-only/);
+  assert.equal(verdict.status, "review_unavailable"); // fail closed, not silently pass
+});
+
+test("policy: external-redacted redacts, external-allowed sends full content", async () => {
+  const prompts = new Map<string, string>();
+  const deps: CouncilDeps = {
+    resolveReviewer: async (config) => okResolution(config),
+    complete: async (resolved, _s, prompt) => {
+      prompts.set(resolved.config.id, prompt);
+      return { text: passJson() };
+    },
+  };
+  const redacted = { ...reviewerB, id: "ext-redacted", scope: "external-redacted" as const };
+  const allowed = { ...reviewerB, id: "ext-allowed", scope: "external-allowed" as const };
+  await runCouncil({
+    goal: "deploy",
+    proposal: "deploy with key sk-proj-abc123def456ghi789 now",
+    config: configWith([redacted, allowed]),
+    deps,
+  });
+  assert.ok(!(prompts.get("ext-redacted") ?? "").includes("sk-proj-abc123def456ghi789"));
+  assert.match(prompts.get("ext-redacted") ?? "", /\[REDACTED\]/);
+  assert.match(prompts.get("ext-allowed") ?? "", /sk-proj-abc123def456ghi789/); // explicit full trust
+});
+
 test("runCouncil wires the parent AbortSignal to every reviewer call, repairs included", async () => {
   const controller = new AbortController();
   const seen: (AbortSignal | undefined)[] = [];
