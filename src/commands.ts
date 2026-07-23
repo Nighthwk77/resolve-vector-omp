@@ -50,7 +50,7 @@ async function cmdDoctor(runtime: RVEngine, ctx: ExtensionCommandContext, ompVer
       checks.push({
         ok: false,
         label: `${reviewer.id}: ${reviewer.provider}/${reviewer.model} does not resolve`,
-        fix: "fix the provider/model id or add it to models.yml",
+        fix: "find valid ids with /model inside omp (authenticated model picker) or check providers in ~/.omp/agent/models.yml, then update the reviewer entry",
       });
       continue;
     }

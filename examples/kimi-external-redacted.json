@@ -1,0 +1,18 @@
+{
+  "_comment": "EXAMPLE: Kimi external reviewer with redacted transport. Secrets are stripped before anything leaves the machine — but redaction is NOT a complete privacy boundary. Requires kimi-code credentials (omp /login or an API key in models.yml). Run /rv doctor after enabling.",
+  "_privacy": "external-redacted is the default for external seats; use external-allowed only for endpoints you fully trust with raw content",
+  "mode": "manual",
+  "reviewers": [
+    {
+      "id": "remote-kimi",
+      "provider": "kimi-code",
+      "model": "kimi-for-coding",
+      "family": "moonshot",
+      "role": "verifier",
+      "local": false,
+      "scope": "external-redacted",
+      "enabled": true,
+      "order": 2
+    }
+  ]
+}

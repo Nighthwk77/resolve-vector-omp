@@ -64,13 +64,16 @@ turns by unique id, and coalesces overlapping completions.
 ## Install (preview)
 
 ```bash
-git clone <this-repo> && cd resolve-vector-omp
+git clone https://github.com/<owner>/resolve-vector-omp.git && cd resolve-vector-omp
 npm install
 npm run install-preview          # installs into ~/.omp/agent/extensions/
 ```
 
-Then restart omp and run `/rv doctor`. To try it: `/rv review`, or set
-`"mode": "always"` in `~/.omp/agent/resolve-vector.json`.
+Then restart omp and run `/rv doctor`. A fresh install starts in `manual`
+mode with **no reviewers** — add a seat from [`examples/`](./examples/)
+(local, Kimi, or any OMP provider), then try `/rv review`, or set
+`"mode": "always"` in `~/.omp/agent/resolve-vector.json` for automatic
+review at completion.
 
 ```bash
 npm run update-preview           # newer code; your config is never touched
@@ -83,55 +86,41 @@ Supported omp: **^17.0.7** (peer dependency; `/rv doctor` verifies).
 
 ## Configuration
 
-`~/.omp/agent/resolve-vector.json` (see `resolve-vector.example.json`):
+`~/.omp/agent/resolve-vector.json` — the installed starter is
+[`resolve-vector.example.json`](./resolve-vector.example.json) (manual mode,
+empty roster). Reviewer entries to copy in live under
+[`examples/`](./examples/):
+
+- [`examples/local-openai-compatible.json`](./examples/local-openai-compatible.json)
+  — a local server (vllm-mlx, Ollama, LM Studio); content never leaves the
+  machine.
+- [`examples/kimi-external-redacted.json`](./examples/kimi-external-redacted.json)
+  — Kimi via OMP's `kimi-code` provider, redacted transport.
+- [`examples/omp-provider.json`](./examples/omp-provider.json) — any
+  provider/model your omp session can already use.
+
+A reviewer entry looks like:
 
 ```json
 {
-  "mode": "manual",
-  "maxExternalAuditsPerHour": 10,
-  "maxExternalAuditsPerDay": 50,
-  "reviewers": [
-    {
-      "id": "local-qwen",
-      "provider": "vllm-mlx",
-      "model": "/Users/jgrayson/models/Qwen3-Coder-Next-MLX-8bit",
-      "family": "qwen",
-      "role": "critic",
-      "local": true,
-      "scope": "local-only",
-      "enabled": true,
-      "order": 1
-    },
-    {
-      "id": "glm-proxy",
-      "provider": "zai-proxy",
-      "model": "glm-5.1",
-      "family": "glm",
-      "role": "verifier",
-      "local": true,
-      "scope": "local-only",
-      "enabled": false,
-      "order": 2
-    },
-    {
-      "id": "remote-kimi",
-      "provider": "kimi-code",
-      "model": "kimi-for-coding",
-      "family": "moonshot",
-      "role": "verifier",
-      "local": false,
-      "scope": "external-redacted",
-      "enabled": false,
-      "order": 3
-    }
-  ]
+  "id": "my-reviewer",
+  "provider": "<omp-provider-id>",
+  "model": "<omp-model-id>",
+  "family": "<model-family>",
+  "role": "critic",
+  "local": true,
+  "scope": "local-only",
+  "enabled": true,
+  "order": 1
 }
 ```
 
 `provider`/`model` resolve through omp's own model registry — reviewers use
-the same authenticated providers your session already trusts. Family
-diversity is checked live against the model catalog: a reviewer from the
-primary model's family is skipped, never consulted.
+the same authenticated providers your session already trusts. Find valid ids
+with `/model` inside omp or in `~/.omp/agent/models.yml`; `/rv doctor`
+verifies every seat. Family diversity is checked live against the model
+catalog: a reviewer from the primary model's family is skipped, never
+consulted.
 
 ## Commands
 

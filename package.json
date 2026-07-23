@@ -12,7 +12,10 @@
   "files": [
     "src",
     "hooks",
+    "scripts",
+    "examples",
     "README.md",
+    "LICENSE",
     "resolve-vector.example.json"
   ],
   "peerDependencies": {

@@ -1,0 +1,36 @@
+{
+  "_comment": "EXAMPLE: local OpenAI-compatible reviewer (vllm-mlx, Ollama, LM Studio, vLLM…). Content never leaves your machine. Copy the reviewers entry into ~/.omp/agent/resolve-vector.json. Find the model id by querying your server: curl http://127.0.0.1:8001/v1/models — then run /rv doctor.",
+  "_usage": "the provider entry below must exist in your ~/.omp/agent/models.yml; adjust baseUrl and the model id to match YOUR server",
+  "mode": "manual",
+  "reviewers": [
+    {
+      "id": "local-reviewer",
+      "provider": "local-openai",
+      "model": "<model-id-from-/v1/models>",
+      "family": "qwen",
+      "role": "critic",
+      "local": true,
+      "scope": "local-only",
+      "enabled": true,
+      "order": 1
+    }
+  ],
+  "_models_yml": {
+    "providers": {
+      "local-openai": {
+        "baseUrl": "http://127.0.0.1:8001/v1",
+        "apiKey": "local",
+        "api": "openai-completions",
+        "auth": "apiKey",
+        "models": [
+          {
+            "id": "<model-id-from-/v1/models>",
+            "name": "Local reviewer",
+            "contextWindow": 131072,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,4 +1,5 @@
 {
+  "_comment": "Resolve Vector starter config. Fresh installs start in manual mode with NO reviewers — nothing runs until you add a seat from examples/ and /rv doctor passes. Copy one of the examples/ files' reviewer entries into the reviewers array below.",
   "mode": "manual",
   "defaultCouncilMode": "review",
   "candidateCount": 3,
@@ -9,39 +10,5 @@
   "maxExternalAuditsPerHour": 10,
   "maxExternalAuditsPerDay": 50,
   "maxConcurrentReviewers": 2,
-  "reviewers": [
-    {
-      "id": "local-qwen",
-      "provider": "vllm-mlx",
-      "model": "/Users/jgrayson/models/Qwen3-Coder-Next-MLX-8bit",
-      "family": "qwen",
-      "role": "critic",
-      "local": true,
-      "scope": "local-only",
-      "enabled": true,
-      "order": 1
-    },
-    {
-      "id": "glm-proxy",
-      "provider": "zai-proxy",
-      "model": "glm-5.1",
-      "family": "glm",
-      "role": "verifier",
-      "local": true,
-      "scope": "local-only",
-      "enabled": false,
-      "order": 2
-    },
-    {
-      "id": "remote-kimi",
-      "provider": "kimi-code",
-      "model": "kimi-for-coding",
-      "family": "moonshot",
-      "role": "verifier",
-      "local": false,
-      "scope": "external-redacted",
-      "enabled": false,
-      "order": 3
-    }
-  ]
+  "reviewers": []
 }

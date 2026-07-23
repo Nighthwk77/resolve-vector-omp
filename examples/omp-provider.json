@@ -1,0 +1,18 @@
+{
+  "_comment": "EXAMPLE: any OMP provider/model as a reviewer. RV resolves seats through OMP's own model registry — any provider+model your omp session can use works as a reviewer. To find valid ids: run /model inside omp (interactive picker of authenticated models), or read ~/.omp/agent/models.yml for custom providers, then /rv doctor to verify.",
+  "_rule": "the reviewer family MUST differ from your primary model's family — RV enforces this live and skips same-family seats",
+  "mode": "manual",
+  "reviewers": [
+    {
+      "id": "my-reviewer",
+      "provider": "<omp-provider-id>",
+      "model": "<omp-model-id>",
+      "family": "<model-family, e.g. qwen, glm, moonshot, deepseek, claude, gpt>",
+      "role": "critic",
+      "local": false,
+      "scope": "external-redacted",
+      "enabled": true,
+      "order": 1
+    }
+  ]
+}
