@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { DEFAULT_CONFIG, type ResolveVectorConfig } from "../src/policy.js";
 import type { CouncilVerdict } from "../src/receipts.js";
+import { CircuitBreakerRegistry } from "../src/circuit-breaker.js";
 import type { RVEngine, RunReviewRequest } from "../src/runtime.js";
 import { registerCouncilAuditTool } from "../src/tool.js";
 
@@ -63,6 +64,8 @@ function makeTool(seats = 1): ToolHarness {
     config,
     configErrors: [],
     configCreated: false,
+    circuits: new CircuitBreakerRegistry({ cooldownMs: 300_000 }),
+    complete: () => Promise.reject(new Error("not under test")),
     setMode: () => {},
     runReview: (_ctx, request, signal) => {
       reviews.push({ request, signal });

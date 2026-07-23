@@ -6,7 +6,9 @@
 import { access, appendFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
+import { probeReviewerGeneration } from "./health.js";
 import { effectiveScope, readLedgerTimestamps } from "./policy.js";
+import { resolveReviewer } from "./providers.js";
 import type { RVEngine } from "./runtime.js";
 
 /** Highest OMP major version RV is verified against (peer range ^17). */
@@ -18,10 +20,26 @@ export interface DoctorCheck {
   fix?: string;
 }
 
+export interface DoctorOptions {
+  /**
+   * Run the tiny generation probe per enabled reviewer. Without it doctor
+   * only proves endpoint reachability — never generation health.
+   */
+  probe?: boolean;
+}
+
+/** Actionable hint when generation is dead but the endpoint answers HTTP. */
+function unresponsiveFix(provider: string, local: boolean): string {
+  return local
+    ? `generation is unresponsive. Restart the ${provider} service, then run /rv doctor.`
+    : `generation is unresponsive at the ${provider} endpoint — check provider status, then /rv reviewer retry.`;
+}
+
 export async function runDoctorChecks(
   runtime: RVEngine,
   ctx: ExtensionCommandContext,
   ompVersion: string,
+  options: DoctorOptions = {},
 ): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
 
@@ -44,7 +62,8 @@ export async function runDoctorChecks(
     checks.push({ ok: runtime.configErrors.length === 0, label: `config ${runtime.paths.configPath}`, fix: runtime.configErrors[0] });
   }
 
-  // 3. Per reviewer: resolves, credentials (never displayed), local reachability.
+  // 3. Per reviewer: resolves, credentials (never displayed), circuit state,
+  //    local reachability, and — only when asked — generation health.
   for (const reviewer of runtime.config.reviewers) {
     if (!reviewer.enabled) continue;
     const model = ctx.models.resolve(`${reviewer.provider}/${reviewer.model}`) ?? ctx.models.resolve(reviewer.model);
@@ -63,12 +82,50 @@ export async function runDoctorChecks(
     } else {
       checks.push({ ok: true, label: `${reviewer.id}: resolves (${family}), credential ${key ? "present (redacted)" : "not required"}` });
     }
+    const circuit = runtime.circuits.snapshot(reviewer.id);
+    if (circuit.state !== "closed") {
+      checks.push({
+        ok: circuit.state === "half_open",
+        label: `${reviewer.id}: circuit ${circuit.state}${circuit.reason ? ` (${circuit.reason})` : ""}${circuit.remainingMs > 0 ? ` — ${Math.ceil(circuit.remainingMs / 1000)}s cooldown left` : ""}`,
+        fix: circuit.state === "open" ? `/rv reviewer retry ${reviewer.id} probes the seat and closes the circuit on success` : undefined,
+      });
+    }
     if (reviewer.local) {
       try {
         const response = await fetch(`${model.baseUrl.replace(/\/$/, "")}/models`, { signal: AbortSignal.timeout(3000) });
-        checks.push({ ok: response.ok, label: `${reviewer.id}: local endpoint ${model.baseUrl} reachable`, fix: response.ok ? undefined : "start the local server (vllm-mlx / ollama / lm-studio)" });
+        checks.push({
+          ok: response.ok,
+          label: `${reviewer.id}: endpoint reachable (HTTP only — NOT proof of generation health)`,
+          fix: response.ok ? undefined : "start the local server (vllm-mlx / ollama / lm-studio)",
+        });
       } catch {
         checks.push({ ok: false, label: `${reviewer.id}: local endpoint ${model.baseUrl} unreachable`, fix: "start the local server (vllm-mlx / ollama / lm-studio)" });
+      }
+    }
+    if (options.probe) {
+      const resolved = await resolveReviewer(ctx, reviewer);
+      if (!resolved.ok) continue; // already reported above
+      // A probe against an open circuit is the one half-open trial.
+      if (circuit.state === "open") runtime.circuits.beginProbe(reviewer.id);
+      // Deadlines follow seat locality: tight for local (a wedged local server
+      // must fail fast), generous enough for slow-but-healthy remote APIs.
+      const probe = await probeReviewerGeneration(runtime.complete, resolved.reviewer, {
+        connectMs: reviewer.local ? 5_000 : runtime.config.connectTimeoutMs,
+        firstTokenMs: reviewer.local ? runtime.config.firstTokenTimeoutMs : runtime.config.remoteFirstTokenTimeoutMs,
+      });
+      if (probe.ok) {
+        runtime.circuits.recordSuccess(reviewer.id);
+        checks.push({
+          ok: true,
+          label: `${reviewer.id}: generation healthy (first meaningful token in ${probe.firstTokenLatencyMs ?? "?"}ms, total ${probe.totalLatencyMs ?? "?"}ms)`,
+        });
+      } else {
+        if (probe.failureCategory) runtime.circuits.recordFailure(reviewer.id, probe.failureCategory);
+        checks.push({
+          ok: false,
+          label: `${reviewer.id}: generation UNHEALTHY — ${probe.failureCategory ?? "error"}: ${probe.error ?? "no meaningful completion"}`,
+          fix: unresponsiveFix(reviewer.provider, reviewer.local),
+        });
       }
     }
   }

@@ -20,7 +20,39 @@ Resolve Vector reads:
 | `maxExternalAuditsPerHour` | `10` | Shared hourly external-call cap |
 | `maxExternalAuditsPerDay` | `50` | Shared daily external-call cap |
 | `maxConcurrentReviewers` | `2` | Maximum parallel reviewer calls |
+| `connectTimeoutMs` | `10000` | Deadline for connection/first stream event (headers) |
+| `firstTokenTimeoutMs` | `10000` | First-meaningful-token deadline for LOCAL reviewers |
+| `remoteFirstTokenTimeoutMs` | `30000` | First-meaningful-token deadline for REMOTE reviewers |
+| `totalTimeoutMs` | `120000` | Total generation deadline per reviewer call |
+| `circuitBreakerCooldownMs` | `300000` | How long a failed seat stays skipped (5 min) |
+| `maxReviewInputChars` | `80000` | Review prompt cap; oversized input is truncated with receipt metadata |
+| `maxReviewOutputTokens` | `4096` | Max output tokens per reviewer call (repair calls included) |
 | `reviewers` | `[]` | Reviewer seat definitions |
+
+## Generation health
+
+Endpoint reachability (`/v1/models`, `/health`) is **not** proof a reviewer
+can generate — a wedged server can answer HTTP while producing zero tokens.
+RV therefore enforces three deadlines on the real review call itself (never a
+pre-review health ping):
+
+1. **connect** — first stream event (headers),
+2. **first meaningful token** — real content or `reasoning_content` deltas;
+   heartbeats, empty deltas, and metadata events never count,
+3. **total** — the whole generation.
+
+A first-token miss aborts the stream, marks the seat `timeout_first_token`,
+opens its circuit breaker, and the council continues immediately with healthy
+reviewers. Open circuits skip the seat for `circuitBreakerCooldownMs`;
+`/rv status` reports the remaining cooldown, and `/rv doctor probe` or
+`/rv reviewer retry <id>` runs one half-open probe that closes the circuit on
+a successful meaningful completion. When a local seat is unresponsive RV says
+so and asks you to restart the model service — RV never kills or restarts
+user-managed servers itself.
+
+`/rv status probe`, `/rv doctor probe`, and setup validation can run a tiny
+generation probe (fixed trivial prompt, ≤8 output tokens, strict first-token
+deadline) that distinguishes `endpoint reachable` from `generation healthy`.
 
 ## Reviewer fields
 
@@ -76,8 +108,9 @@ Verdicts are appended to:
 ```
 
 Receipts include activation reason, reviewer outcomes, findings, evidence,
-latency, reported token usage, revision relationship, and deterministic check
-results. Secrets are redacted before persistence.
+latency (connect, first-token, and total), failure category, circuit state,
+skip/degradation flags, reported token usage, revision relationship, and
+deterministic check results. Secrets are redacted before persistence.
 
 ## Privacy scopes
 

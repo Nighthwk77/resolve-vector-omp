@@ -77,6 +77,87 @@ Respond with ONLY a JSON object, no prose, in this exact shape:
 }
 Use "fail" only for objective errors: contradictions, violated constraints, missing mandatory evidence. Use "concern" for material reasoning issues. "pass" means you tried to break it and could not.`;
 
+/* ─────────────────────── bounded review input ─────────────────────── */
+
+const GOAL_CAP_CHARS = 4_000;
+const CONSTRAINT_CAP_CHARS = 500;
+const MAX_CONSTRAINTS = 20;
+const EVIDENCE_FIELD_CAP_CHARS = 500;
+const MAX_EVIDENCE_ITEMS = 20;
+/** Scaffolding (headers, instructions) reserved on top of field content. */
+const PROMPT_OVERHEAD_CHARS = 400;
+
+export interface BoundedReviewRequest {
+  request: ReviewRequest;
+  /** True when any field was capped or an item was dropped. */
+  truncated: boolean;
+}
+
+function capText(text: string, limit: number): { text: string; truncated: boolean } {
+  if (text.length <= limit) return { text, truncated: false };
+  return {
+    text: `${text.slice(0, limit)}\n[RV: truncated — ${text.length - limit} chars omitted to bound review context]`,
+    truncated: true,
+  };
+}
+
+/**
+ * Bound a review request to maxChars of prompt content. Only the review
+ * goal, completed answer, evidence, and constraints are ever sent — never
+ * the whole conversation. Truncation is explicit: markers go INTO the
+ * prompt (so the reviewer knows) and `truncated` goes into the receipt.
+ */
+export function boundReviewRequest(request: ReviewRequest, maxChars: number): BoundedReviewRequest {
+  let truncated = false;
+
+  const goal = capText(request.goal, GOAL_CAP_CHARS);
+  truncated ||= goal.truncated;
+
+  const constraints: string[] = [];
+  for (const constraint of (request.constraints ?? []).slice(0, MAX_CONSTRAINTS)) {
+    const capped = capText(constraint, CONSTRAINT_CAP_CHARS);
+    truncated ||= capped.truncated;
+    constraints.push(capped.text);
+  }
+  const droppedConstraints = (request.constraints?.length ?? 0) - constraints.length;
+  if (droppedConstraints > 0) {
+    truncated = true;
+    constraints.push(`[RV: ${droppedConstraints} further constraints omitted to bound review context]`);
+  }
+
+  const evidence: EvidenceItem[] = [];
+  for (const item of (request.evidence ?? []).slice(0, MAX_EVIDENCE_ITEMS)) {
+    const ref = capText(item.ref, EVIDENCE_FIELD_CAP_CHARS);
+    const detail = item.detail === undefined ? undefined : capText(item.detail, EVIDENCE_FIELD_CAP_CHARS);
+    truncated ||= ref.truncated || (detail?.truncated ?? false);
+    evidence.push({ kind: item.kind, ref: ref.text, detail: detail?.text });
+  }
+  const droppedEvidence = (request.evidence?.length ?? 0) - evidence.length;
+  if (droppedEvidence > 0) {
+    truncated = true;
+    evidence.push({ kind: "other", ref: `[RV: ${droppedEvidence} further evidence items omitted to bound review context]` });
+  }
+
+  const used =
+    PROMPT_OVERHEAD_CHARS +
+    goal.text.length +
+    constraints.reduce((sum, c) => sum + c.length + 2, 0) +
+    evidence.reduce((sum, e) => sum + e.ref.length + (e.detail?.length ?? 0) + 12, 0);
+  const proposalBudget = Math.max(1_000, maxChars - used);
+  const proposal = capText(request.proposal, proposalBudget);
+  truncated ||= proposal.truncated;
+
+  return {
+    request: {
+      goal: goal.text,
+      proposal: proposal.text,
+      constraints: constraints.length > 0 ? constraints : undefined,
+      evidence: evidence.length > 0 ? evidence : undefined,
+    },
+    truncated,
+  };
+}
+
 export function buildReviewPrompt(request: ReviewRequest): string {
   const parts: string[] = [
     "## Goal under review",

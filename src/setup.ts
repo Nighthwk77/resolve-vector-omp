@@ -227,8 +227,9 @@ export async function runSetupWizard(runtime: RVEngine, ctx: ExtensionCommandCon
   await runtime.reload();
   ui.notify(`RV · config written${backup ? ` (backup: ${backup})` : ""} — runtime reloaded, no restart needed.`, "info");
 
-  // 7. Doctor against the new config.
-  const checks = await runDoctorChecks(runtime, ctx, ompVersion);
+  // 7. Doctor against the new config — including the tiny generation probe:
+  //    endpoint reachability alone is not proof a reviewer can generate.
+  const checks = await runDoctorChecks(runtime, ctx, ompVersion, { probe: true });
   const failed = checks.filter((c) => !c.ok);
   ui.notify(formatDoctor(checks), failed.length === 0 ? "info" : "warning");
   ui.notify(

@@ -5,6 +5,7 @@
  * defaults are conservative (manual mode, no external spend).
  */
 import { open, readFile, appendFile, writeFile, stat, unlink } from "node:fs/promises";
+import type { StreamDeadlines } from "./stream-guard.js";
 
 export type ActivationMode = "off" | "manual" | "auto" | "always" | "sample";
 export type CouncilMode = "review" | "best" | "fusion" | "compare";
@@ -54,7 +55,30 @@ export interface ResolveVectorConfig {
   maxExternalAuditsPerHour: number;
   maxExternalAuditsPerDay: number;
   maxConcurrentReviewers: number;
+  /** Max wait for the connection/first stream event (headers). */
+  connectTimeoutMs: number;
+  /** Max wait for the first meaningful token from LOCAL reviewers. */
+  firstTokenTimeoutMs: number;
+  /** Max wait for the first meaningful token from REMOTE reviewers. */
+  remoteFirstTokenTimeoutMs: number;
+  /** Max wait for a whole generation (connect + tokens + completion). */
+  totalTimeoutMs: number;
+  /** How long a reviewer stays skipped after its circuit opens. */
+  circuitBreakerCooldownMs: number;
+  /** Hard cap on review prompt size; oversized inputs are truncated with metadata. */
+  maxReviewInputChars: number;
+  /** Max output tokens per reviewer call (also bounds repair calls). */
+  maxReviewOutputTokens: number;
   reviewers: ReviewerConfig[];
+}
+
+/** Resolve the three generation deadlines for one seat from config. */
+export function reviewerDeadlines(reviewer: ReviewerConfig, config: ResolveVectorConfig): StreamDeadlines {
+  return {
+    connectMs: config.connectTimeoutMs,
+    firstTokenMs: reviewer.local ? config.firstTokenTimeoutMs : config.remoteFirstTokenTimeoutMs,
+    totalMs: config.totalTimeoutMs,
+  };
 }
 
 export const DEFAULT_CONFIG: ResolveVectorConfig = {
@@ -68,6 +92,13 @@ export const DEFAULT_CONFIG: ResolveVectorConfig = {
   maxExternalAuditsPerHour: 10,
   maxExternalAuditsPerDay: 50,
   maxConcurrentReviewers: 2,
+  connectTimeoutMs: 10_000,
+  firstTokenTimeoutMs: 10_000,
+  remoteFirstTokenTimeoutMs: 30_000,
+  totalTimeoutMs: 120_000,
+  circuitBreakerCooldownMs: 300_000,
+  maxReviewInputChars: 80_000,
+  maxReviewOutputTokens: 4096,
   reviewers: [],
 };
 
@@ -166,7 +197,14 @@ export function parseConfig(raw: unknown): { config: ResolveVectorConfig; errors
     | "sampleRate"
     | "maxExternalAuditsPerHour"
     | "maxExternalAuditsPerDay"
-    | "maxConcurrentReviewers";
+    | "maxConcurrentReviewers"
+    | "connectTimeoutMs"
+    | "firstTokenTimeoutMs"
+    | "remoteFirstTokenTimeoutMs"
+    | "totalTimeoutMs"
+    | "circuitBreakerCooldownMs"
+    | "maxReviewInputChars"
+    | "maxReviewOutputTokens";
   const num = (key: NumericKey, min: number, max: number): void => {
     const value = raw[key];
     if (value === undefined) return;
@@ -182,6 +220,13 @@ export function parseConfig(raw: unknown): { config: ResolveVectorConfig; errors
   num("maxExternalAuditsPerHour", 0, 1000);
   num("maxExternalAuditsPerDay", 0, 10000);
   num("maxConcurrentReviewers", 1, 8);
+  num("connectTimeoutMs", 500, 120_000);
+  num("firstTokenTimeoutMs", 1_000, 300_000);
+  num("remoteFirstTokenTimeoutMs", 1_000, 300_000);
+  num("totalTimeoutMs", 5_000, 900_000);
+  num("circuitBreakerCooldownMs", 10_000, 3_600_000);
+  num("maxReviewInputChars", 2_000, 1_000_000);
+  num("maxReviewOutputTokens", 256, 32_000);
   const bool = (key: "runInBackground" | "allowInteractiveWindows"): void => {
     const value = raw[key];
     if (value === undefined) return;

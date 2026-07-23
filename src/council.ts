@@ -11,7 +11,7 @@
  * secret-redacted before they leave the process, and every external call —
  * attempt, failure, or repair retry — is budget-reserved BEFORE dispatch.
  */
-import { GENERIC_REVIEW_SYSTEM_PROMPT, buildReviewPrompt, parseReviewResponse } from "./domain/generic.js";
+import { GENERIC_REVIEW_SYSTEM_PROMPT, boundReviewRequest, buildReviewPrompt, parseReviewResponse } from "./domain/generic.js";
 import { buildCandidatePrompt, CANDIDATE_SYSTEM_PROMPT } from "./candidates.js";
 import {
   anonymizeCandidates,
@@ -23,10 +23,18 @@ import {
 } from "./judge.js";
 import { buildFusionPrompt, FUSION_SYSTEM_PROMPT, parseFusionPlan } from "./fusion.js";
 import type { BudgetCoordinator, BudgetDecision, ResolveVectorConfig, ReviewerConfig } from "./policy.js";
-import { checkExternalBudget, effectiveScope } from "./policy.js";
-import type { ResolveResult, ResolvedReviewer, ReviewerOutput } from "./providers.js";
+import { checkExternalBudget, effectiveScope, reviewerDeadlines } from "./policy.js";
+import type { CompleteCallOptions, ResolveResult, ResolvedReviewer, ReviewerOutput } from "./providers.js";
+import type { CircuitBreakerRegistry } from "./circuit-breaker.js";
+import { CIRCUIT_OPENING_CATEGORIES, ReviewerCallError, type FailureCategory } from "./stream-guard.js";
 import type { CandidateReceipt, CheckReceipt, CouncilVerdict, EvidenceItem, Finding, ReviewerReceipt, VerdictStatus } from "./receipts.js";
 import { newReceiptId, redactSecrets } from "./receipts.js";
+
+/** Visible progress events; the runtime wires these to ctx.ui notifications. */
+export type CouncilProgressEvent =
+  | { type: "council_started"; reviewerIds: string[] }
+  | { type: "reviewer_unavailable"; reviewerId: string; detail: string; remaining: string[] }
+  | { type: "reviewer_skipped"; reviewerId: string; detail: string };
 
 export interface CouncilDeps {
   resolveReviewer: (config: ReviewerConfig) => Promise<ResolveResult>;
@@ -34,11 +42,15 @@ export interface CouncilDeps {
     resolved: ResolvedReviewer,
     systemPrompt: string,
     userPrompt: string,
-    signal?: AbortSignal,
+    options?: CompleteCallOptions,
   ) => Promise<ReviewerOutput>;
   now?: () => number;
   /** Parent cancellation signal, wired to every reviewer call. */
   signal?: AbortSignal;
+  /** Per-reviewer circuit breaker; open seats are skipped before dispatch. */
+  circuit?: CircuitBreakerRegistry;
+  /** Progress notifications (started / unavailable / skipped). */
+  onProgress?: (event: CouncilProgressEvent) => void;
   /** Atomic budget reservations. Takes precedence over externalTimestamps. */
   budget?: BudgetCoordinator;
   /** Legacy fallback: past external-call timestamps for non-atomic budget checks. */
@@ -87,6 +99,7 @@ function skippedReceipt(config: ReviewerConfig, status: ReviewerReceipt["status"
     calls: 0,
     findings: [],
     latencyMs: 0,
+    skipped: true,
     error: detail,
   };
 }
@@ -105,10 +118,23 @@ async function reviewWith(
     family: resolved.family,
     local: resolved.config.local,
   };
+  // Bound the review context: only the goal, answer, evidence, and
+  // constraints go out — never the whole OMP conversation — and oversized
+  // inputs are truncated with explicit receipt metadata.
+  const bounded = boundReviewRequest(
+    { goal: input.goal, proposal: input.proposal, evidence: input.evidence, constraints: input.constraints },
+    input.config.maxReviewInputChars,
+  );
+  const deadlines = reviewerDeadlines(resolved.config, input.config);
+  const callOptions: CompleteCallOptions = {
+    signal: deps.signal,
+    deadlines,
+    maxTokens: input.config.maxReviewOutputTokens,
+  };
   // Privacy: secrets are redacted before external transport UNLESS the seat
   // is explicitly external-allowed. Local seats never leave the machine.
   const scope = effectiveScope(resolved.config);
-  const rawPrompt = buildReviewPrompt(input);
+  const rawPrompt = buildReviewPrompt(bounded.request);
   const transportPrompt = resolved.config.local || scope === "external-allowed" ? rawPrompt : redactSecrets(rawPrompt);
   let calls = 0;
   // Every external call — the initial attempt included — is budget-reserved
@@ -122,13 +148,14 @@ async function reviewWith(
         calls: 0,
         findings: [],
         latencyMs: 0,
+        skipped: true,
         error: initial.reason ?? "budget reached",
       };
     }
   }
   try {
     calls += 1;
-    const output = await deps.complete(resolved, GENERIC_REVIEW_SYSTEM_PROMPT, transportPrompt, deps.signal);
+    const output = await deps.complete(resolved, GENERIC_REVIEW_SYSTEM_PROMPT, transportPrompt, callOptions);
     const latencyMs = (deps.now ?? Date.now)() - started;
     try {
       const parsed = parseReviewResponse(output.text);
@@ -140,12 +167,16 @@ async function reviewWith(
         summary: parsed.summary,
         findings: parsed.findings,
         latencyMs,
+        connectLatencyMs: output.metrics?.connectLatencyMs,
+        firstTokenLatencyMs: output.metrics?.firstTokenLatencyMs,
+        inputTruncated: bounded.truncated || undefined,
         usage: output.usage,
       };
     } catch (parseError) {
       // One repair retry (proven in the legacy panel-review experiment): resend
       // the ORIGINAL request plus the bad output, demand bare JSON. Fail closed
-      // if it still does not comply — never treat prose as a pass.
+      // if it still does not comply — never treat prose as a pass. Repair only
+      // ever follows a SUCCESSFUL call; transport timeouts never reach here.
       if (!resolved.config.local) {
         const repairBudget = await reserveExternal();
         if (!repairBudget.allowed) {
@@ -165,7 +196,7 @@ async function reviewWith(
         resolved,
         GENERIC_REVIEW_SYSTEM_PROMPT,
         `## Original review request\n${transportPrompt}\n\n## Your previous response (not a valid JSON verdict, truncated)\n${output.text.slice(0, 500)}\n\nRespond to the original request with ONLY the JSON verdict object now.`,
-        deps.signal,
+        callOptions,
       );
       const repairLatency = (deps.now ?? Date.now)() - started;
       try {
@@ -178,6 +209,9 @@ async function reviewWith(
           summary: parsed.summary,
           findings: parsed.findings,
           latencyMs: repairLatency,
+          connectLatencyMs: repaired.metrics?.connectLatencyMs ?? output.metrics?.connectLatencyMs,
+          firstTokenLatencyMs: repaired.metrics?.firstTokenLatencyMs ?? output.metrics?.firstTokenLatencyMs,
+          inputTruncated: bounded.truncated || undefined,
           usage: {
             input: (output.usage?.input ?? 0) + (repaired.usage?.input ?? 0),
             output: (output.usage?.output ?? 0) + (repaired.usage?.output ?? 0),
@@ -200,6 +234,28 @@ async function reviewWith(
     }
   } catch (error) {
     const latencyMs = (deps.now ?? Date.now)() - started;
+    if (error instanceof ReviewerCallError) {
+      // Typed transport failure: no retry, no repair — the council continues
+      // immediately with healthy reviewers.
+      const status =
+        error.category === "timeout_first_token"
+          ? ("timeout_first_token" as const)
+          : error.category === "timeout_connect" || error.category === "timeout_total"
+            ? ("timeout" as const)
+            : ("error" as const);
+      return {
+        ...base,
+        status,
+        calls,
+        findings: [],
+        latencyMs,
+        connectLatencyMs: error.metrics?.connectLatencyMs,
+        firstTokenLatencyMs: error.metrics?.firstTokenLatencyMs,
+        failureCategory: error.category,
+        inputTruncated: bounded.truncated || undefined,
+        error: error.message,
+      };
+    }
     const message = (error as Error).message;
     const isTimeout = /timed?\s*out|timeout|aborted/i.test(message) || (error as Error).name === "TimeoutError";
     return {
@@ -208,6 +264,7 @@ async function reviewWith(
       calls,
       findings: [],
       latencyMs,
+      inputTruncated: bounded.truncated || undefined,
       error: message,
     };
   }
@@ -282,6 +339,26 @@ async function prepareSeats(
       );
       continue;
     }
+    // Circuit breaker: a seat whose generation timed out or broke transport
+    // recently stays skipped for its cooldown — no more waiting on dead seats.
+    const circuitBlock = deps.circuit?.check(reviewerConfig.id);
+    if (circuitBlock) {
+      receipts.push({
+        ...skippedReceipt(
+          reviewerConfig,
+          "skipped_circuit_open",
+          `circuit open (${circuitBlock.reason}) — retry in ${Math.ceil(circuitBlock.remainingMs / 1000)}s, or /rv reviewer retry ${reviewerConfig.id}`,
+        ),
+        circuitState: "open",
+        failureCategory: circuitBlock.reason,
+      });
+      deps.onProgress?.({
+        type: "reviewer_skipped",
+        reviewerId: reviewerConfig.id,
+        detail: `circuit open (${circuitBlock.reason}), ${Math.ceil(circuitBlock.remainingMs / 1000)}s remaining`,
+      });
+      continue;
+    }
     runnable.push(result.reviewer);
   }
   return { runnable, receipts };
@@ -304,18 +381,54 @@ export async function runCouncil(input: RunCouncilInput): Promise<CouncilVerdict
   const seats = await prepareSeats(config, deps, input.primaryFamily);
   const receipts: ReviewerReceipt[] = [...seats.receipts];
 
-  const runReceipts = await mapLimited(seats.runnable, config.maxConcurrentReviewers, (reviewer) =>
-    reviewWith(reviewer, input, deps, reserveFor(config, deps)),
-  );
+  deps.onProgress?.({ type: "council_started", reviewerIds: seats.runnable.map((r) => r.config.id) });
+  const inFlight = new Set(seats.runnable.map((r) => r.config.id));
+
+  const runReceipts = await mapLimited(seats.runnable, config.maxConcurrentReviewers, async (reviewer) => {
+    const id = reviewer.config.id;
+    const receipt = await reviewWith(reviewer, input, deps, reserveFor(config, deps));
+    inFlight.delete(id);
+    // Circuit bookkeeping + immediate visibility. A failed seat NEVER blocks
+    // a healthy seat's verdict — the user hears about degradation as it
+    // happens, not after the total timeout.
+    if (deps.circuit) {
+      if (receipt.status === "ok") {
+        deps.circuit.recordSuccess(id);
+      } else if (receipt.failureCategory && CIRCUIT_OPENING_CATEGORIES[receipt.failureCategory as FailureCategory]) {
+        deps.circuit.recordFailure(id, receipt.failureCategory as FailureCategory);
+      }
+      receipt.circuitState = deps.circuit.snapshot(id).state;
+    }
+    if (receipt.status !== "ok") {
+      deps.onProgress?.({
+        type: "reviewer_unavailable",
+        reviewerId: id,
+        detail: receipt.error ?? receipt.status,
+        remaining: [...inFlight],
+      });
+    }
+    return receipt;
+  });
   receipts.push(...runReceipts);
 
   const okReceipts = receipts.filter((r) => r.status === "ok" && r.verdict);
   const status = mergeStatuses(okReceipts.map((r) => r.verdict as VerdictStatus));
   const findings = okReceipts.flatMap((r) => r.findings);
+  // Coverage is degraded when an enabled seat failed or was circuit-skipped
+  // while at least one reviewer succeeded. Policy skips (same-family,
+  // budget, local-only) are by-design, not degradation.
+  const degradedBy = receipts.filter(
+    (r) => r.status === "error" || r.status === "timeout" || r.status === "timeout_first_token" || r.status === "skipped_circuit_open",
+  );
+  const coverageDegraded = okReceipts.length > 0 && degradedBy.length > 0;
   const summary =
     okReceipts.length === 0
       ? "No reviewer completed; review unavailable."
-      : okReceipts.map((r) => `${r.reviewerId}: ${r.summary ?? r.verdict}`).join(" | ");
+      : `${okReceipts.map((r) => `${r.reviewerId}: ${r.summary ?? r.verdict}`).join(" | ")}${
+          coverageDegraded
+            ? ` — reduced coverage (${degradedBy.map((r) => `${r.reviewerId}: ${r.status}`).join(", ")})`
+            : ""
+        }`;
 
   return {
     id: newReceiptId(startedAt),
@@ -330,6 +443,7 @@ export async function runCouncil(input: RunCouncilInput): Promise<CouncilVerdict
       output: okReceipts.reduce((sum, r) => sum + (r.usage?.output ?? 0), 0),
       totalLatencyMs: now() - startedAt,
     },
+    coverageDegraded: coverageDegraded || undefined,
     createdAt: new Date(startedAt).toISOString(),
   };
 }
@@ -365,6 +479,7 @@ async function callSeat(
   deps: CouncilDeps,
   reserve: () => BudgetDecision | Promise<BudgetDecision>,
   started: () => number,
+  callOptions: CompleteCallOptions,
 ): Promise<{ output?: ReviewerOutput; receipt: ReviewerReceipt }> {
   const base = {
     reviewerId: seat.config.id,
@@ -380,12 +495,42 @@ async function callSeat(
   const prompt = seat.config.local || effectiveScope(seat.config) === "external-allowed" ? rawPrompt : redactSecrets(rawPrompt);
   const t0 = started();
   try {
-    const output = await deps.complete(seat, systemPrompt, prompt, deps.signal);
+    const output = await deps.complete(seat, systemPrompt, prompt, callOptions);
+    deps.circuit?.recordSuccess(seat.config.id);
     return {
       output,
-      receipt: { ...base, status: "ok", calls: 1, findings: [], latencyMs: started() - t0, usage: output.usage },
+      receipt: {
+        ...base,
+        status: "ok",
+        calls: 1,
+        findings: [],
+        latencyMs: started() - t0,
+        connectLatencyMs: output.metrics?.connectLatencyMs,
+        firstTokenLatencyMs: output.metrics?.firstTokenLatencyMs,
+        circuitState: deps.circuit?.snapshot(seat.config.id).state,
+        usage: output.usage,
+      },
     };
   } catch (error) {
+    if (error instanceof ReviewerCallError) {
+      if (deps.circuit && CIRCUIT_OPENING_CATEGORIES[error.category]) {
+        deps.circuit.recordFailure(seat.config.id, error.category);
+      }
+      return {
+        receipt: {
+          ...base,
+          status: error.category === "timeout_first_token" ? "timeout_first_token" : error.category.startsWith("timeout") ? "timeout" : "error",
+          calls: 1,
+          findings: [],
+          latencyMs: started() - t0,
+          connectLatencyMs: error.metrics?.connectLatencyMs,
+          firstTokenLatencyMs: error.metrics?.firstTokenLatencyMs,
+          failureCategory: error.category,
+          circuitState: deps.circuit?.snapshot(seat.config.id).state,
+          error: error.message,
+        },
+      };
+    }
     const message = (error as Error).message;
     const isTimeout = /timed?\s*out|timeout|aborted/i.test(message) || (error as Error).name === "TimeoutError";
     return {
@@ -460,6 +605,7 @@ export async function runEnsemble(input: RunEnsembleInput): Promise<CouncilVerdi
         deps,
         reserveFor(config, deps),
         now,
+        { signal: deps.signal, deadlines: reviewerDeadlines(seat.config, config), maxTokens: config.maxReviewOutputTokens },
       );
       const candidate: CandidateReceipt = { ...receipt, anonId: "", latencyMs: now() - t0 };
       candidateReceipts.push(candidate);
@@ -501,6 +647,7 @@ export async function runEnsemble(input: RunEnsembleInput): Promise<CouncilVerdi
       deps,
       reserveFor(config, deps),
       now,
+      { signal: deps.signal, deadlines: reviewerDeadlines(judgeSeat.config, config), maxTokens: config.maxReviewOutputTokens },
     );
     reviewerReceipts.push(judgeCall.receipt);
     if (!judgeCall.output) return unavailable(`judge call failed: ${judgeCall.receipt.error ?? "unknown"}`);
@@ -603,6 +750,7 @@ export async function runEnsemble(input: RunEnsembleInput): Promise<CouncilVerdi
       deps,
       reserveFor(config, deps),
       now,
+      { signal: deps.signal, deadlines: reviewerDeadlines(fusionSeat.config, config), maxTokens: config.maxReviewOutputTokens },
     );
     reviewerReceipts.push(fusionCall.receipt);
     if (!fusionCall.output) return unavailable(`fusion call failed: ${fusionCall.receipt.error ?? "unknown"}`);

@@ -133,6 +133,16 @@ export function registerCouncilAuditTool(pi: ExtensionAPI, runtime: RVEngine): v
             evidence: params.evidence,
             primaryFamily,
             activationReason: "tool_call",
+            onProgress: (event) => {
+              if (event.type === "reviewer_unavailable") {
+                ctx.ui.notify(
+                  event.remaining.length > 0
+                    ? `RV · ${event.reviewerId} unavailable (${event.detail}) — continuing with ${event.remaining.join(" and ")}`
+                    : `RV · ${event.reviewerId} unavailable (${event.detail})`,
+                  "warning",
+                );
+              }
+            },
           },
           signal,
         );

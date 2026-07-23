@@ -11,6 +11,7 @@ import {
 } from "../src/activation.js";
 import { DEFAULT_CONFIG, type ResolveVectorConfig } from "../src/policy.js";
 import type { CouncilVerdict, VerdictStatus } from "../src/receipts.js";
+import { CircuitBreakerRegistry } from "../src/circuit-breaker.js";
 import type { RVEngine, RunReviewRequest } from "../src/runtime.js";
 
 // Fake ctx: the controller only forwards it to the (faked) runtime and deps.
@@ -86,6 +87,8 @@ function makeHarness(mode: ResolveVectorConfig["mode"], overrides: Partial<Resol
     config,
     configErrors: [],
     configCreated: false,
+    circuits: new CircuitBreakerRegistry({ cooldownMs: 300_000 }),
+    complete: () => Promise.reject(new Error("not under test")),
     setMode: () => {},
     runReview: (_ctx, request, signal) => {
       reviews.push(request);

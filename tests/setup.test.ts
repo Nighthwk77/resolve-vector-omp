@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { DEFAULT_CONFIG, type ResolveVectorConfig } from "../src/policy.js";
+import { CircuitBreakerRegistry } from "../src/circuit-breaker.js";
 import type { RVEngine } from "../src/runtime.js";
 import { applySetup, buildCandidateList, isLocalBaseUrl, runSetupWizard, writeConfigAtomic } from "../src/setup.js";
 
@@ -55,6 +56,8 @@ function makeHarness(
     config,
     configErrors: [],
     configCreated: options.existingConfig === undefined,
+    circuits: new CircuitBreakerRegistry({ cooldownMs: 300_000 }),
+    complete: () => Promise.reject(new Error("not under test")),
     setMode: () => {},
     runReview: () => Promise.reject(new Error("not under test")),
     runEnsemble: () => Promise.reject(new Error("not under test")),

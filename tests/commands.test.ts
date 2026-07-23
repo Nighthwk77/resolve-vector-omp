@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import { registerRvCommand } from "../src/commands.js";
 import { DEFAULT_CONFIG, type ActivationMode, type ResolveVectorConfig } from "../src/policy.js";
+import { CircuitBreakerRegistry } from "../src/circuit-breaker.js";
 import type { RVEngine } from "../src/runtime.js";
 
 type Notify = { message: string; type?: string };
@@ -27,6 +28,8 @@ function fakeEngine(): RVEngine {
     paths: { configPath: "/tmp/rv-fake/config.json", receiptsPath: "/tmp/rv-fake/r.jsonl", ledgerPath: "/tmp/rv-fake/b.jsonl" },
     configErrors: [],
     configCreated: true,
+    circuits: new CircuitBreakerRegistry({ cooldownMs: 300_000 }),
+    complete: () => Promise.reject(new Error("not under test")),
     setMode(mode: ActivationMode) {
       engine.config = { ...engine.config, mode };
     },

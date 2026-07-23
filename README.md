@@ -110,10 +110,11 @@ the current session with `/rv on auto`, `/rv on always`, or `/rv off`.
 | `/rv best [n]` | Generate independent candidates and select the checked winner |
 | `/rv fuse [n]` | Build a conflict-aware synthesis, then review it |
 | `/rv compare [n]` | Show alternatives without forcing a winner |
-| `/rv status` | Show mode, reviewers, privacy scopes, budgets, and recent verdicts |
+| `/rv status [probe]` | Show mode, reviewers, circuit state, budgets, and recent verdicts; `probe` adds a tiny generation-health check |
 | `/rv usage` | Show GLM/Z.ai quota when the local proxy is configured |
 | `/rv setup` | Native wizard: reviewers, privacy scopes, activation mode, atomic write |
-| `/rv doctor` | Check models, credentials, endpoints, paths, privacy, and OMP version |
+| `/rv doctor [probe]` | Check models, credentials, endpoints, paths, privacy, and OMP version; `probe` proves generation health, not just reachability |
+| `/rv reviewer retry <id>` | One half-open probe of a circuit-broken reviewer; closes the circuit on success |
 | `/rv on [auto\|always\|sample]` | Enable automatic review for this session |
 | `/rv off` | Disable automatic review for this session |
 | `/rv config` | Show configuration and receipt locations |
@@ -166,6 +167,12 @@ The installer never overwrites a configured reviewer roster.
   and model IDs, then run `/rv doctor`.
 - **`review_unavailable`:** `/rv status` shows whether family diversity,
   privacy policy, endpoint health, or budget blocked the seat.
+- **Reviewer generation unresponsive (endpoint answers but no tokens):** RV
+  aborts at the first-token deadline (~10s local), opens the seat's circuit
+  for five minutes, and continues with healthy reviewers. Restart the model
+  service (e.g. vllm-mlx), then run `/rv doctor probe` or
+  `/rv reviewer retry <id>` to close the circuit. RV never restarts
+  user-managed servers itself.
 - **Local endpoint unreachable:** start vLLM, vllm-mlx, Ollama, or LM Studio,
   then rerun `/rv doctor`.
 - **External budget exhausted:** wait for the window or adjust the configured

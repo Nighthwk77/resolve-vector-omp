@@ -11,7 +11,8 @@
  */
 import { join } from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { CouncilDeps } from "./council.js";
+import { CircuitBreakerRegistry } from "./circuit-breaker.js";
+import type { CouncilDeps, CouncilProgressEvent } from "./council.js";
 import { runCouncil, runEnsemble } from "./council.js";
 import { FileBudgetLedger, loadConfig, type ActivationMode, type BudgetCoordinator, type ResolveVectorConfig } from "./policy.js";
 import { resolveReviewer, runReviewerCompletion } from "./providers.js";
@@ -47,6 +48,8 @@ export interface RunReviewRequest {
   activationReason: ReviewReceipt["activationReason"];
   activationDetail?: string;
   revisionRound?: number;
+  /** Visible progress (reviewing with… / unavailable — continuing with…). */
+  onProgress?: (event: CouncilProgressEvent) => void;
 }
 
 export interface RunEnsembleRequest {
@@ -67,6 +70,10 @@ export interface RunEnsembleRequest {
 export interface RVEngine {
   readonly paths: RuntimePaths;
   readonly config: ResolveVectorConfig;
+  /** Per-reviewer circuit breaker; shared by reviews, doctor, and /rv status. */
+  readonly circuits: CircuitBreakerRegistry;
+  /** Transport seam (headless pi-ai by default); used by council and health probes. */
+  readonly complete: CouncilDeps["complete"];
   configErrors: string[];
   configCreated: boolean;
   setMode(mode: ActivationMode): void;
@@ -86,7 +93,8 @@ export interface RuntimeOptions {
 
 export class RVRuntime implements RVEngine {
   private budget: BudgetCoordinator;
-  private readonly complete: CouncilDeps["complete"];
+  readonly complete: CouncilDeps["complete"];
+  readonly circuits: CircuitBreakerRegistry;
 
   private constructor(
     public readonly paths: RuntimePaths,
@@ -97,8 +105,9 @@ export class RVRuntime implements RVEngine {
   ) {
     this.complete =
       options.complete ??
-      ((resolved, systemPrompt, userPrompt, signal) =>
-        runReviewerCompletion(resolved, systemPrompt, userPrompt, { signal }));
+      ((resolved, systemPrompt, userPrompt, callOptions) =>
+        runReviewerCompletion(resolved, systemPrompt, userPrompt, callOptions));
+    this.circuits = new CircuitBreakerRegistry({ cooldownMs: config.circuitBreakerCooldownMs });
     this.budget =
       options.budget ??
       new FileBudgetLedger(config, paths.ledgerPath, async () => {
@@ -123,6 +132,8 @@ export class RVRuntime implements RVEngine {
     this.config = config;
     this.configErrors = errors;
     this.configCreated = created;
+    // Circuit state survives reload (a dead seat stays skipped); the cooldown retunes.
+    this.circuits.cooldownMs = config.circuitBreakerCooldownMs;
     this.budget = new FileBudgetLedger(config, this.paths.ledgerPath, async () => {
       return externalCallUnits(await readReceipts(this.paths.receiptsPath).catch(() => []));
     });
@@ -141,6 +152,8 @@ export class RVRuntime implements RVEngine {
         complete: this.complete,
         budget: this.budget,
         signal,
+        circuit: this.circuits,
+        onProgress: request.onProgress,
       },
     });
     const receipt: ReviewReceipt = {
@@ -174,6 +187,7 @@ export class RVRuntime implements RVEngine {
         complete: this.complete,
         budget: this.budget,
         signal,
+        circuit: this.circuits,
       },
     });
     await appendReceipt(this.paths.receiptsPath, {

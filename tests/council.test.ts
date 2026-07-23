@@ -253,8 +253,8 @@ test("runCouncil wires the parent AbortSignal to every reviewer call, repairs in
   let calls = 0;
   const deps: CouncilDeps = {
     resolveReviewer: async (config) => okResolution(config),
-    complete: async (_resolved, _system, _prompt, signal) => {
-      seen.push(signal);
+    complete: async (_resolved, _system, _prompt, options) => {
+      seen.push(options?.signal);
       calls += 1;
       return { text: calls === 1 ? "not json" : passJson() };
     },
@@ -352,4 +352,223 @@ test("runCouncil repair retry includes the original review request", async () =>
   assert.match(prompts[1], /UNIQUE-GOAL-MARKER/);
   assert.match(prompts[1], /UNIQUE-PROPOSAL-MARKER/);
   assert.match(prompts[1], /garbage prose/); // plus the offending output
+});
+
+/* ─────────────── stalled-reviewer handling (Qwen/vllm-mlx regression) ─────────────── */
+
+import { CircuitBreakerRegistry } from "../src/circuit-breaker.js";
+import { ReviewerCallError } from "../src/stream-guard.js";
+import { renderStatusLine } from "../src/render.js";
+import type { CouncilProgressEvent } from "../src/council.js";
+
+const reviewerKimi: ReviewerConfig = {
+  id: "kimi",
+  provider: "kimi-code",
+  model: "kimi-for-coding",
+  family: "moonshot",
+  role: "verifier",
+  local: false,
+  enabled: true,
+  order: 2,
+};
+
+test("first-token timeout: no retry, no repair, typed receipt, immediate continuation", async () => {
+  let qwenCalls = 0;
+  const events: CouncilProgressEvent[] = [];
+  const deps: CouncilDeps = {
+    resolveReviewer: async (config) => okResolution(config),
+    complete: async (resolved) => {
+      if (resolved.config.id === "local-qwen") {
+        qwenCalls += 1;
+        throw new ReviewerCallError("timeout_first_token", "no meaningful token within 10s — generation unresponsive", {
+          connectLatencyMs: 180,
+          totalLatencyMs: 10_000,
+        });
+      }
+      return { text: passJson("kimi says sound") };
+    },
+    onProgress: (event) => events.push(event),
+  };
+  const verdict = await runCouncil({
+    ...baseInput,
+    config: configWith([reviewerA, reviewerKimi]),
+    deps,
+  });
+  const qwen = verdict.reviewers.find((r) => r.reviewerId === "local-qwen");
+  assert.equal(qwen?.status, "timeout_first_token");
+  assert.equal(qwen?.failureCategory, "timeout_first_token");
+  assert.equal(qwen?.connectLatencyMs, 180, "connection latency recorded in the receipt");
+  assert.equal(qwenCalls, 1, "never retried, never repair-attempted after a transport timeout");
+  // The healthy seat's verdict still ships.
+  assert.equal(verdict.status, "pass");
+  assert.equal(verdict.coverageDegraded, true);
+  assert.match(verdict.summary, /reduced coverage/);
+  // Progress: council start roster + degradation notice naming the survivor.
+  assert.deepEqual(events.find((e) => e.type === "council_started"), { type: "council_started", reviewerIds: ["local-qwen", "kimi"] });
+  const unavailable = events.find((e) => e.type === "reviewer_unavailable");
+  assert.equal(unavailable?.type === "reviewer_unavailable" && unavailable.reviewerId, "local-qwen");
+});
+
+test("circuit opens after a generation timeout and skips that reviewer next council", async () => {
+  const circuit = new CircuitBreakerRegistry({ cooldownMs: 300_000 });
+  let qwenCalls = 0;
+  const deps: CouncilDeps = {
+    resolveReviewer: async (config) => okResolution(config),
+    complete: async (resolved) => {
+      if (resolved.config.id === "local-qwen") {
+        qwenCalls += 1;
+        throw new ReviewerCallError("timeout_first_token", "no meaningful token within 10s");
+      }
+      return { text: passJson() };
+    },
+    circuit,
+  };
+  const first = await runCouncil({ ...baseInput, config: configWith([reviewerA, reviewerKimi]), deps });
+  assert.equal(first.reviewers.find((r) => r.reviewerId === "local-qwen")?.circuitState, "open");
+  assert.equal(qwenCalls, 1);
+
+  const second = await runCouncil({ ...baseInput, config: configWith([reviewerA, reviewerKimi]), deps });
+  const qwen = second.reviewers.find((r) => r.reviewerId === "local-qwen");
+  assert.equal(qwen?.status, "skipped_circuit_open");
+  assert.equal(qwen?.skipped, true);
+  assert.equal(qwen?.circuitState, "open");
+  assert.match(qwen?.error ?? "", /retry in \d+s/);
+  assert.equal(qwenCalls, 1, "open circuit never dispatches the dead seat");
+  assert.equal(second.status, "pass", "healthy reviewer's verdict still returned");
+  assert.equal(second.coverageDegraded, true);
+});
+
+test("half-open trial after cooldown: a successful meaningful completion closes the circuit", async () => {
+  let now = 1_000_000;
+  const circuit = new CircuitBreakerRegistry({ cooldownMs: 300_000, now: () => now });
+  circuit.recordFailure("local-qwen", "timeout_first_token");
+  now += 300_001; // cooldown expired
+  const deps: CouncilDeps = {
+    resolveReviewer: async (config) => okResolution(config),
+    complete: async () => ({ text: passJson("qwen recovered") }),
+    circuit,
+    now: () => now,
+  };
+  const verdict = await runCouncil({ ...baseInput, config: configWith([reviewerA]), deps });
+  assert.equal(verdict.status, "pass");
+  assert.equal(verdict.reviewers[0].status, "ok");
+  assert.deepEqual(circuit.snapshot("local-qwen"), { state: "closed", remainingMs: 0 });
+});
+
+test("healthy remote reviewer returns WITHOUT waiting the 120s total deadline", async () => {
+  // Simulated clock: Qwen burns its full 10s first-token budget, Kimi answers
+  // in 30s. Verdict must land at ~30s of council time — never 120s.
+  let now = 1_000_000;
+  const deps: CouncilDeps = {
+    resolveReviewer: async (config) => okResolution(config),
+    complete: async (resolved) => {
+      if (resolved.config.id === "local-qwen") {
+        now += 10_000;
+        throw new ReviewerCallError("timeout_first_token", "no meaningful token within 10s — generation unresponsive");
+      }
+      now += 30_000;
+      return { text: passJson("kimi verdict") };
+    },
+    now: () => now,
+  };
+  const verdict = await runCouncil({
+    ...baseInput,
+    config: configWith([reviewerA, reviewerKimi]),
+    deps,
+  });
+  assert.equal(verdict.status, "pass");
+  assert.ok(verdict.usage.totalLatencyMs < 60_000, `returned after ${verdict.usage.totalLatencyMs}ms — must not wait 120s`);
+  assert.equal(verdict.reviewers.find((r) => r.reviewerId === "local-qwen")?.status, "timeout_first_token");
+});
+
+test("reduced coverage is never rendered as fully verified", async () => {
+  const deps = makeDeps({
+    "local-qwen": new ReviewerCallError("transport", "socket hang up"),
+    "remote-deepseek": passJson(),
+  });
+  const verdict = await runCouncil({
+    ...baseInput,
+    config: configWith([reviewerA, reviewerB]),
+    deps,
+  });
+  assert.equal(verdict.status, "pass");
+  assert.equal(verdict.coverageDegraded, true);
+  const line = renderStatusLine(verdict);
+  assert.match(line, /reduced coverage/, "status line must disclose degraded coverage");
+  assert.ok(!/^RV · verified$/.test(line), "never the bare 'verified' label");
+});
+
+test("all reviewers stalled → review_unavailable, never a silent pass", async () => {
+  const deps = makeDeps({
+    "local-qwen": new ReviewerCallError("timeout_first_token", "no meaningful token within 10s"),
+    "remote-deepseek": new ReviewerCallError("timeout_total", "generation exceeded total deadline of 120s"),
+  });
+  const verdict = await runCouncil({
+    ...baseInput,
+    config: configWith([reviewerA, reviewerB]),
+    deps,
+  });
+  assert.equal(verdict.status, "review_unavailable");
+  assert.equal(verdict.coverageDegraded, undefined, "no successful reviewer → unavailable, not degraded");
+});
+
+test("oversized review context is bounded with explicit receipt metadata", async () => {
+  const prompts: string[] = [];
+  const deps: CouncilDeps = {
+    resolveReviewer: async (config) => okResolution(config),
+    complete: async (_resolved, _system, prompt) => {
+      prompts.push(prompt);
+      return { text: passJson() };
+    },
+  };
+  const hugeProposal = "A".repeat(500_000);
+  const verdict = await runCouncil({
+    goal: "check the change",
+    proposal: hugeProposal,
+    evidence: Array.from({ length: 50 }, (_, i) => ({ kind: "file" as const, ref: `src/file-${i}.ts`, detail: "D".repeat(2_000) })),
+    config: configWith([reviewerA]),
+    deps,
+  });
+  assert.equal(prompts.length, 1);
+  assert.ok(prompts[0].length < 500_000, "prompt must be bounded");
+  assert.ok(prompts[0].length <= 90_000, `prompt ${prompts[0].length} chars exceeds the configured cap + slack`);
+  assert.match(prompts[0], /\[RV: truncated/, "truncation is visible to the reviewer");
+  assert.match(prompts[0], /evidence items omitted/, "dropped evidence is disclosed");
+  assert.equal(verdict.reviewers[0].inputTruncated, true, "receipt carries explicit truncation metadata");
+});
+
+test("small review context is not truncated", async () => {
+  const prompts: string[] = [];
+  const deps: CouncilDeps = {
+    resolveReviewer: async (config) => okResolution(config),
+    complete: async (_resolved, _system, prompt) => {
+      prompts.push(prompt);
+      return { text: passJson() };
+    },
+  };
+  const verdict = await runCouncil({ ...baseInput, config: configWith([reviewerA]), deps });
+  assert.doesNotMatch(prompts[0], /\[RV: truncated/);
+  assert.equal(verdict.reviewers[0].inputTruncated, undefined);
+});
+
+test("council passes separate generation deadlines per seat locality", async () => {
+  const seen = new Map<string, { firstTokenMs?: number; totalMs?: number; connectMs?: number }>();
+  const deps: CouncilDeps = {
+    resolveReviewer: async (config) => okResolution(config),
+    complete: async (resolved, _system, _prompt, options) => {
+      seen.set(resolved.config.id, {
+        connectMs: options?.deadlines?.connectMs,
+        firstTokenMs: options?.deadlines?.firstTokenMs,
+        totalMs: options?.deadlines?.totalMs,
+      });
+      return { text: passJson() };
+    },
+  };
+  await runCouncil({
+    ...baseInput,
+    config: configWith([reviewerA, reviewerKimi], { firstTokenTimeoutMs: 10_000, remoteFirstTokenTimeoutMs: 30_000, totalTimeoutMs: 90_000, connectTimeoutMs: 5_000 }),
+    deps,
+  });
+  assert.deepEqual(seen.get("local-qwen"), { connectMs: 5_000, firstTokenMs: 10_000, totalMs: 90_000 });
+  assert.deepEqual(seen.get("kimi"), { connectMs: 5_000, firstTokenMs: 30_000, totalMs: 90_000 });
 });

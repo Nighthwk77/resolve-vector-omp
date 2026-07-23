@@ -364,6 +364,18 @@ export class ActivationController {
             activationReason: current.reason,
             activationDetail: current.detail ?? (current.reason === "revision" ? "revision" : undefined),
             revisionRound: this.state.revisionRound,
+            onProgress: (event) => {
+              if (gen !== this.generation) return; // stale session: silent
+              if (event.type === "reviewer_unavailable") {
+                this.deps.notify(
+                  ctx,
+                  event.remaining.length > 0
+                    ? `RV · ${event.reviewerId} unavailable (${event.detail}) — continuing with ${event.remaining.join(" and ")}`
+                    : `RV · ${event.reviewerId} unavailable (${event.detail})`,
+                  "warning",
+                );
+              }
+            },
           },
           controller.signal,
         );

@@ -10,7 +10,7 @@ import { dirname } from "node:path";
 import type { CouncilMode } from "./policy.js";
 
 /** Reviewer statuses that mean the provider actually saw traffic. */
-const DISPATCHED_STATUSES: Record<string, true> = { ok: true, error: true, timeout: true };
+const DISPATCHED_STATUSES: Record<string, true> = { ok: true, error: true, timeout: true, timeout_first_token: true };
 
 export type VerdictStatus = "pass" | "concern" | "fail" | "split" | "insufficient_evidence" | "review_unavailable";
 
@@ -43,19 +43,41 @@ export interface Finding {
   suggestedCorrection?: string;
 }
 
+export type ReviewerStatus =
+  | "ok"
+  | "skipped_budget"
+  | "skipped_same_family"
+  | "skipped_policy"
+  | "skipped_circuit_open"
+  | "error"
+  | "timeout"
+  | "timeout_first_token";
+
 export interface ReviewerReceipt {
   reviewerId: string;
   provider: string;
   model: string;
   family: string;
   local: boolean;
-  status: "ok" | "skipped_budget" | "skipped_same_family" | "skipped_policy" | "error" | "timeout";
+  status: ReviewerStatus;
   /** Provider calls made: 1 normally, 2 when the repair retry fired. Budget accounting uses this. */
   calls?: number;
   verdict?: VerdictStatus;
   findings: Finding[];
   summary?: string;
   latencyMs: number;
+  /** Connection/headers latency, when the stream opened. */
+  connectLatencyMs?: number;
+  /** First meaningful token latency, when one arrived. */
+  firstTokenLatencyMs?: number;
+  /** Typed failure classification (timeout_first_token, transport, malformed_stream, …). */
+  failureCategory?: string;
+  /** Circuit-breaker state observed for this seat during the council. */
+  circuitState?: "closed" | "open" | "half_open";
+  /** True when the seat never ran (circuit open, policy, budget, same-family). */
+  skipped?: boolean;
+  /** True when the review input was truncated to stay within maxReviewInputChars. */
+  inputTruncated?: boolean;
   usage?: { input?: number; output?: number };
   error?: string;
 }
@@ -74,7 +96,7 @@ export interface CandidateReceipt {
   model: string;
   family: string;
   local: boolean;
-  status: "ok" | "skipped_budget" | "skipped_same_family" | "skipped_policy" | "error" | "timeout";
+  status: ReviewerStatus;
   calls?: number;
   latencyMs: number;
   usage?: { input?: number; output?: number };
@@ -101,6 +123,8 @@ export interface CouncilVerdict {
   candidates?: CandidateReceipt[];
   deterministicChecks: CheckReceipt[];
   usage: UsageReceipt;
+  /** True when at least one enabled seat failed or was circuit-skipped while others succeeded. */
+  coverageDegraded?: boolean;
   createdAt: string;
 }
 

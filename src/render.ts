@@ -7,13 +7,17 @@ import type { CouncilVerdict, Finding, ReviewerReceipt } from "./receipts.js";
 
 /** One-line status for notifications while/after a review runs. */
 export function renderStatusLine(verdict: CouncilVerdict): string {
+  // Degraded coverage is never presented as fully verified.
+  const degraded = verdict.coverageDegraded ? " — reduced coverage (reviewer unavailable)" : "";
   switch (verdict.status) {
     case "pass":
-      return verdict.mode === "review" ? "RV · verified" : `RV · ${verdict.mode} complete${verdict.selectedCandidateId ? ` — ${verdict.selectedCandidateId}` : ""}`;
+      return verdict.mode === "review"
+        ? `RV · verified${degraded}`
+        : `RV · ${verdict.mode} complete${verdict.selectedCandidateId ? ` — ${verdict.selectedCandidateId}` : ""}${degraded}`;
     case "concern":
-      return `RV · concern found (${verdict.findings.length} finding${verdict.findings.length === 1 ? "" : "s"})`;
+      return `RV · concern found (${verdict.findings.length} finding${verdict.findings.length === 1 ? "" : "s"})${degraded}`;
     case "fail":
-      return `RV · FAIL — ${verdict.findings.length} finding${verdict.findings.length === 1 ? "" : "s"}`;
+      return `RV · FAIL — ${verdict.findings.length} finding${verdict.findings.length === 1 ? "" : "s"}${degraded}`;
     case "split":
       return "RV · split verdict; user decision needed";
     case "insufficient_evidence":
@@ -39,10 +43,12 @@ function renderFinding(finding: Finding, index: number): string {
 function renderReviewer(reviewer: ReviewerReceipt): string {
   const where = reviewer.local ? "local" : "remote";
   if (reviewer.status !== "ok") {
-    return `  ✗ ${reviewer.reviewerId} (${reviewer.provider}/${reviewer.model}, ${where}) — ${reviewer.status}: ${reviewer.error ?? ""}`;
+    const category = reviewer.failureCategory ? ` [${reviewer.failureCategory}]` : "";
+    return `  ✗ ${reviewer.reviewerId} (${reviewer.provider}/${reviewer.model}, ${where}) — ${reviewer.status}${category}: ${reviewer.error ?? ""}`;
   }
   const usage = reviewer.usage?.input !== undefined ? ` · ${reviewer.usage.input}→${reviewer.usage.output ?? "?"} tok` : "";
-  return `  ✓ ${reviewer.reviewerId} (${reviewer.provider}/${reviewer.model}, ${where}) → ${reviewer.verdict} · ${reviewer.latencyMs}ms${usage}`;
+  const firstToken = reviewer.firstTokenLatencyMs !== undefined ? ` · first token ${reviewer.firstTokenLatencyMs}ms` : "";
+  return `  ✓ ${reviewer.reviewerId} (${reviewer.provider}/${reviewer.model}, ${where}) → ${reviewer.verdict} · ${reviewer.latencyMs}ms${firstToken}${usage}`;
 }
 
 /** Split presentation: the competing conclusions and material disagreements. */
@@ -67,10 +73,15 @@ export function renderVerdict(verdict: CouncilVerdict): string {
   const lines: string[] = [
     `━━━ Resolve Vector ${verdict.mode} verdict: ${verdict.status.toUpperCase()} ━━━`,
     verdict.summary,
+  ];
+  if (verdict.coverageDegraded) {
+    lines.push("⚠ reduced coverage — at least one reviewer failed or was skipped; verdict rests on fewer seats");
+  }
+  lines.push(
     "",
     "Reviewers:",
     ...verdict.reviewers.map(renderReviewer),
-  ];
+  );
   if (verdict.findings.length > 0) {
     lines.push("", "Findings:", ...verdict.findings.map(renderFinding));
   }
