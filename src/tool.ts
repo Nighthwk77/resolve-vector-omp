@@ -23,6 +23,7 @@ interface CouncilAuditParams {
   proposal?: string;
   constraints?: string[];
   evidence?: EvidenceItem[];
+  candidateCount?: number;
 }
 
 const EVIDENCE_KINDS: Record<EvidenceItem["kind"], true> = {
@@ -47,6 +48,12 @@ function parseParams(raw: unknown): CouncilAuditParams | string {
   if ("proposal" in raw && typeof raw.proposal === "string") params.proposal = raw.proposal;
   if ("constraints" in raw && Array.isArray(raw.constraints)) {
     params.constraints = raw.constraints.filter((c): c is string => typeof c === "string");
+  }
+  if ("candidateCount" in raw) {
+    if (typeof raw.candidateCount !== "number" || !Number.isInteger(raw.candidateCount) || raw.candidateCount < 2 || raw.candidateCount > 8) {
+      return "params.candidateCount: must be an integer 2-8";
+    }
+    params.candidateCount = raw.candidateCount;
   }
   if ("evidence" in raw && Array.isArray(raw.evidence)) {
     const evidence: EvidenceItem[] = [];
@@ -89,6 +96,9 @@ export function registerCouncilAuditTool(pi: ExtensionAPI, runtime: RVEngine): v
       constraints: Type.Optional(
         Type.Array(Type.String(), { description: "Hard constraints the answer must satisfy." }),
       ),
+      candidateCount: Type.Optional(
+        Type.Number({ description: "Ensemble modes: how many candidates to generate (2-8, default from config).", minimum: 2, maximum: 8 }),
+      ),
       evidence: Type.Optional(
         Type.Array(
           Type.Object({
@@ -105,23 +115,44 @@ export function registerCouncilAuditTool(pi: ExtensionAPI, runtime: RVEngine): v
     execute: async (_toolCallId, rawParams, signal, _onUpdate, ctx) => {
       const params = parseParams(rawParams);
       if (typeof params === "string") return textResult(`council_audit: ${params}`, true);
-      if (params.mode !== "review") {
-        return textResult(`council_audit mode "${params.mode}" is not implemented yet (Milestone 3). Use mode: "review".`, true);
-      }
-      if (!params.proposal || params.proposal.trim().length === 0) {
-        return textResult("council_audit review requires `proposal`: the completed answer/action to audit.", true);
-      }
-      if (runtime.config.reviewers.filter((r) => r.enabled).length === 0) {
+      const enabledSeats = runtime.config.reviewers.filter((r) => r.enabled).length;
+      if (enabledSeats === 0) {
         return textResult(`council_audit unavailable: no enabled reviewers in ${runtime.paths.configPath}.`, true);
       }
-      const verdict = await runtime.runReview(
+      const primaryFamily = ctx.model ? ctx.models.family(ctx.model) : undefined;
+      if (params.mode === "review") {
+        if (!params.proposal || params.proposal.trim().length === 0) {
+          return textResult("council_audit review requires `proposal`: the completed answer/action to audit.", true);
+        }
+        const verdict = await runtime.runReview(
+          ctx,
+          {
+            goal: params.goal,
+            proposal: params.proposal,
+            constraints: params.constraints,
+            evidence: params.evidence,
+            primaryFamily,
+            activationReason: "tool_call",
+          },
+          signal,
+        );
+        return textResult(`${renderStatusLine(verdict)}\n\n${renderVerdict(verdict)}`, verdict.status === "fail");
+      }
+      if (params.mode !== "best" && params.mode !== "fusion" && params.mode !== "compare") {
+        return textResult(`council_audit: unknown mode "${params.mode}" — use review, best, fusion, or compare.`, true);
+      }
+      if (enabledSeats < 2) {
+        return textResult(`council_audit ${params.mode} needs at least 2 enabled reviewers; only ${enabledSeats} configured.`, true);
+      }
+      const verdict = await runtime.runEnsemble(
         ctx,
         {
+          mode: params.mode,
           goal: params.goal,
-          proposal: params.proposal,
           constraints: params.constraints,
           evidence: params.evidence,
-          primaryFamily: ctx.model ? ctx.models.family(ctx.model) : undefined,
+          candidateCount: params.candidateCount,
+          primaryFamily,
           activationReason: "tool_call",
         },
         signal,

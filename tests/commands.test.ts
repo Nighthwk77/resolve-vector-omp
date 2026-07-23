@@ -31,6 +31,7 @@ function fakeEngine(): RVEngine {
       engine.config = { ...engine.config, mode };
     },
     runReview: () => Promise.reject(new Error("not under test")),
+    runEnsemble: () => Promise.reject(new Error("not under test")),
     recentReceipts: () => Promise.resolve([]),
   };
   return engine;

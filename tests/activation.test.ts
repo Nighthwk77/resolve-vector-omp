@@ -94,6 +94,7 @@ function makeHarness(mode: ResolveVectorConfig["mode"], overrides: Partial<Resol
       if (!next) return Promise.reject(new Error("no verdict queued"));
       return Promise.resolve(next);
     },
+    runEnsemble: () => Promise.reject(new Error("not under test")),
     recentReceipts: () => Promise.resolve([]),
   };
   const deps: ActivationDeps = {

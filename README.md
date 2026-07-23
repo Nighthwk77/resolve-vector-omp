@@ -84,5 +84,9 @@ Milestones 1–2 work and are smoke-tested end to end:
   coalesced into a one-item pending slot (newest wins) instead of being
   dropped.
 
-`best`/`fusion`/`compare` return an explicit not-yet-implemented error until
-Milestone 3.
+`best`/`fusion`/`compare` are live (M3): candidates generate independently
+from the reviewer roster, judging is blind (anonymized + shuffled, seat
+identity never reaches the judge), deterministic checks disqualify before
+scores are compared, fusion preserves unresolved conflicts and passes a final
+independent review. `/rv best|fuse|compare [count]` and `council_audit` modes
+share the same engine.

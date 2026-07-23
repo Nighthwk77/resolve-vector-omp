@@ -93,9 +93,34 @@ async function dispatch(runtime: RVEngine, args: string, ctx: ExtensionCommandCo
       return;
     case "best":
     case "fuse":
-    case "compare":
-      ctx.ui.notify(`RV · /rv ${sub} lands in Milestone 3 (ensemble modes). /rv review works today.`, "warning");
+    case "compare": {
+      const mode = sub === "fuse" ? "fusion" : sub;
+      const count = rest[0] !== undefined ? Number.parseInt(rest[0], 10) : runtime.config.candidateCount;
+      if (!Number.isInteger(count) || count < 2 || count > 8) {
+        ctx.ui.notify(`RV · /rv ${sub} [count] — count must be an integer 2-8`, "warning");
+        return;
+      }
+      if (runtime.config.reviewers.filter((r) => r.enabled).length < 2) {
+        ctx.ui.notify(`RV · /rv ${sub} needs at least 2 enabled reviewers in ${runtime.paths.configPath}`, "warning");
+        return;
+      }
+      const { goal } = lastExchange(ctx);
+      if (!goal) {
+        ctx.ui.notify("RV · no goal in this session to build candidates from", "warning");
+        return;
+      }
+      ctx.ui.notify(`RV · ${mode} of ${count} — generating candidates…`, "info");
+      const verdict = await runtime.runEnsemble(ctx, {
+        mode,
+        goal,
+        candidateCount: count,
+        primaryFamily: ctx.model ? ctx.models.family(ctx.model) : undefined,
+        activationReason: "manual_command",
+      });
+      ctx.ui.notify(renderStatusLine(verdict), verdict.status === "pass" ? "info" : "warning");
+      ctx.ui.notify(renderVerdict(verdict), "info");
       return;
+    }
     default:
       ctx.ui.notify(`RV · unknown subcommand "${sub}". Try: status, review, on, off, config`, "warning");
   }

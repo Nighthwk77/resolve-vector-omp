@@ -9,7 +9,7 @@ import type { CouncilVerdict, Finding, ReviewerReceipt } from "./receipts.js";
 export function renderStatusLine(verdict: CouncilVerdict): string {
   switch (verdict.status) {
     case "pass":
-      return "RV · verified";
+      return verdict.mode === "review" ? "RV · verified" : `RV · ${verdict.mode} complete${verdict.selectedCandidateId ? ` — ${verdict.selectedCandidateId}` : ""}`;
     case "concern":
       return `RV · concern found (${verdict.findings.length} finding${verdict.findings.length === 1 ? "" : "s"})`;
     case "fail":
@@ -56,6 +56,18 @@ export function renderVerdict(verdict: CouncilVerdict): string {
   ];
   if (verdict.findings.length > 0) {
     lines.push("", "Findings:", ...verdict.findings.map(renderFinding));
+  }
+  if (verdict.candidates && verdict.candidates.length > 0) {
+    lines.push("", "Candidates:");
+    for (const candidate of verdict.candidates) {
+      if (candidate.status !== "ok") {
+        lines.push(`  ✗ ${candidate.reviewerId} — ${candidate.status}: ${candidate.error ?? ""}`);
+      } else {
+        lines.push(
+          `  ✓ ${candidate.anonId} (${candidate.reviewerId}) — ${candidate.total ?? "?"}/35${candidate.disqualified ? " DISQUALIFIED" : ""} · ${candidate.latencyMs}ms`,
+        );
+      }
+    }
   }
   lines.push(
     "",

@@ -11,6 +11,11 @@ interface CapturedCall {
   signal?: AbortSignal;
 }
 
+interface CapturedEnsemble {
+  request: { mode: string; goal: string; candidateCount?: number };
+  signal?: AbortSignal;
+}
+
 const fakeVerdict: CouncilVerdict = {
   id: "rv-test",
   mode: "review",
@@ -31,18 +36,28 @@ type Execute = (
   ctx: ExtensionContext,
 ) => Promise<AgentToolResult>;
 
-function makeTool(captured: CapturedCall[]): (params: unknown, signal?: AbortSignal) => Promise<AgentToolResult> {
+interface ToolHarness {
+  run: (params: unknown, signal?: AbortSignal) => Promise<AgentToolResult>;
+  reviews: CapturedCall[];
+  ensembles: CapturedEnsemble[];
+}
+
+function makeTool(seats = 1): ToolHarness {
+  const reviews: CapturedCall[] = [];
+  const ensembles: CapturedEnsemble[] = [];
   const config: ResolveVectorConfig = { ...DEFAULT_CONFIG, reviewers: [] };
-  config.reviewers.push({
-    id: "seat",
-    provider: "p",
-    model: "m",
-    family: "f",
-    role: "critic",
-    local: true,
-    enabled: true,
-    order: 1,
-  });
+  for (let i = 0; i < seats; i++) {
+    config.reviewers.push({
+      id: `seat-${i}`,
+      provider: "p",
+      model: "m",
+      family: "f",
+      role: "critic",
+      local: true,
+      enabled: true,
+      order: i,
+    });
+  }
   const engine: RVEngine = {
     paths: { configPath: "/tmp/rv-fake/config.json", receiptsPath: "/tmp/rv-fake/r.jsonl", ledgerPath: "/tmp/rv-fake/b.jsonl" },
     config,
@@ -50,7 +65,11 @@ function makeTool(captured: CapturedCall[]): (params: unknown, signal?: AbortSig
     configCreated: false,
     setMode: () => {},
     runReview: (_ctx, request, signal) => {
-      captured.push({ request, signal });
+      reviews.push({ request, signal });
+      return Promise.resolve(fakeVerdict);
+    },
+    runEnsemble: (_ctx, request, signal) => {
+      ensembles.push({ request, signal });
       return Promise.resolve(fakeVerdict);
     },
     recentReceipts: () => Promise.resolve([]),
@@ -60,7 +79,7 @@ function makeTool(captured: CapturedCall[]): (params: unknown, signal?: AbortSig
   const stub = () => ({});
   const pi = {
     typebox: {
-      Type: { Object: stub, Enum: stub, String: stub, Optional: stub, Array: stub },
+      Type: { Object: stub, Enum: stub, String: stub, Optional: stub, Array: stub, Number: stub },
     },
     registerTool: (definition: { execute: Execute }) => {
       execute = definition.execute;
@@ -70,7 +89,7 @@ function makeTool(captured: CapturedCall[]): (params: unknown, signal?: AbortSig
   assert.ok(execute, "council_audit must register");
   const registered: Execute = execute;
   const ctx = { model: undefined } as unknown as ExtensionContext;
-  return (params, signal) => registered("tc-1", params, signal, undefined, ctx);
+  return { run: (params, signal) => registered("tc-1", params, signal, undefined, ctx), reviews, ensembles };
 }
 
 function resultText(result: AgentToolResult): string {
@@ -81,17 +100,15 @@ function resultText(result: AgentToolResult): string {
 }
 
 test("council_audit rejects the removed profile param with an actionable error", async () => {
-  const captured: CapturedCall[] = [];
-  const run = makeTool(captured);
+  const { run, reviews } = makeTool();
   const result = await run({ mode: "review", goal: "g", proposal: "p", profile: "source-faithfulness" });
   assert.equal(result.isError, true);
   assert.match(resultText(result), /profile is not supported/);
-  assert.equal(captured.length, 0); // never reached the engine
+  assert.equal(reviews.length, 0); // never reached the engine
 });
 
 test("council_audit flows evidence into the review request", async () => {
-  const captured: CapturedCall[] = [];
-  const run = makeTool(captured);
+  const { run, reviews } = makeTool();
   const result = await run({
     mode: "review",
     goal: "port spell X",
@@ -104,8 +121,8 @@ test("council_audit flows evidence into the review request", async () => {
     ],
   });
   assert.equal(result.isError, false);
-  assert.equal(captured.length, 1);
-  const evidence = captured[0].request.evidence ?? [];
+  assert.equal(reviews.length, 1);
+  const evidence = reviews[0].request.evidence ?? [];
   assert.equal(evidence.length, 3); // junk entry dropped
   assert.deepEqual(evidence[0], { kind: "file", ref: "engine.cpp:412", detail: "coefficient source" });
   assert.equal(evidence[1].kind, "other"); // missing kind → other
@@ -113,19 +130,32 @@ test("council_audit flows evidence into the review request", async () => {
 });
 
 test("council_audit wires the parent AbortSignal into runReview", async () => {
-  const captured: CapturedCall[] = [];
-  const run = makeTool(captured);
+  const { run, reviews } = makeTool();
   const controller = new AbortController();
   await run({ mode: "review", goal: "g", proposal: "p" }, controller.signal);
-  assert.equal(captured.length, 1);
-  assert.equal(captured[0].signal, controller.signal);
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0].signal, controller.signal);
 });
 
-test("council_audit ensemble modes fail with a clear not-implemented error", async () => {
-  const captured: CapturedCall[] = [];
-  const run = makeTool(captured);
-  const result = await run({ mode: "best", goal: "g", candidateCount: 3 });
+test("council_audit routes ensemble modes to runEnsemble with candidateCount", async () => {
+  const { run, reviews, ensembles } = makeTool(2);
+  const ok = await run({ mode: "best", goal: "g", candidateCount: 3 });
+  assert.equal(ok.isError, false);
+  assert.equal(ensembles.length, 1);
+  assert.equal(ensembles[0].request.mode, "best");
+  assert.equal(ensembles[0].request.candidateCount, 3);
+  assert.equal(reviews.length, 0);
+
+  const bad = await run({ mode: "fusion", goal: "g", candidateCount: 9 });
+  assert.equal(bad.isError, true);
+  assert.match(resultText(bad), /candidateCount/);
+  assert.equal(ensembles.length, 1); // never reached the engine
+});
+
+test("council_audit ensemble modes require at least two enabled seats", async () => {
+  const { run, ensembles } = makeTool(1);
+  const result = await run({ mode: "best", goal: "g" });
   assert.equal(result.isError, true);
-  assert.match(resultText(result), /not implemented yet/);
-  assert.equal(captured.length, 0);
+  assert.match(resultText(result), /at least 2 enabled reviewers/);
+  assert.equal(ensembles.length, 0);
 });

@@ -12,7 +12,7 @@
 import { join } from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { CouncilDeps } from "./council.js";
-import { runCouncil } from "./council.js";
+import { runCouncil, runEnsemble } from "./council.js";
 import { FileBudgetLedger, loadConfig, type ActivationMode, type BudgetCoordinator, type ResolveVectorConfig } from "./policy.js";
 import { resolveReviewer, runReviewerCompletion } from "./providers.js";
 import {
@@ -48,6 +48,16 @@ export interface RunReviewRequest {
   revisionRound?: number;
 }
 
+export interface RunEnsembleRequest {
+  mode: "best" | "fusion" | "compare";
+  goal: string;
+  constraints?: string[];
+  evidence?: EvidenceItem[];
+  candidateCount?: number;
+  primaryFamily?: string;
+  activationReason: ReviewReceipt["activationReason"];
+}
+
 /**
  * The surface commands and tools depend on. RVRuntime implements it; tests
  * substitute plain fakes without importing the provider stack (which loads
@@ -60,6 +70,7 @@ export interface RVEngine {
   readonly configCreated: boolean;
   setMode(mode: ActivationMode): void;
   runReview(ctx: ExtensionContext, request: RunReviewRequest, signal?: AbortSignal): Promise<CouncilVerdict>;
+  runEnsemble(ctx: ExtensionContext, request: RunEnsembleRequest, signal?: AbortSignal): Promise<CouncilVerdict>;
   recentReceipts(limit: number): Promise<ReviewReceipt[]>;
 }
 
@@ -132,5 +143,31 @@ export class RVRuntime implements RVEngine {
   async recentReceipts(limit: number): Promise<ReviewReceipt[]> {
     const receipts = await readReceipts(this.paths.receiptsPath);
     return receipts.slice(-limit);
+  }
+
+  async runEnsemble(ctx: ExtensionContext, request: RunEnsembleRequest, signal?: AbortSignal): Promise<CouncilVerdict> {
+    const verdict = await runEnsemble({
+      mode: request.mode,
+      goal: request.goal,
+      constraints: request.constraints,
+      evidence: request.evidence,
+      candidateCount: request.candidateCount ?? this.config.candidateCount,
+      primaryFamily: request.primaryFamily,
+      config: this.config,
+      deps: {
+        resolveReviewer: (reviewer) => resolveReviewer(ctx, reviewer),
+        complete: this.complete,
+        budget: this.budget,
+        signal,
+      },
+    });
+    await appendReceipt(this.paths.receiptsPath, {
+      receiptId: verdict.id,
+      activationReason: request.activationReason,
+      revisionRound: 0,
+      primaryFamily: request.primaryFamily,
+      verdict,
+    });
+    return verdict;
   }
 }

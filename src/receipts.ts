@@ -66,6 +66,23 @@ export interface CheckReceipt {
   detail?: string;
 }
 
+/** One generated candidate in an ensemble run. `anonId` is what the judge saw. */
+export interface CandidateReceipt {
+  anonId: string;
+  reviewerId: string;
+  provider: string;
+  model: string;
+  family: string;
+  local: boolean;
+  status: "ok" | "skipped_budget" | "skipped_same_family" | "error" | "timeout";
+  calls?: number;
+  latencyMs: number;
+  usage?: { input?: number; output?: number };
+  disqualified?: boolean;
+  total?: number;
+  error?: string;
+}
+
 export interface UsageReceipt {
   input: number;
   output: number;
@@ -81,6 +98,7 @@ export interface CouncilVerdict {
   selectedCandidateId?: string;
   finalAnswer?: string;
   reviewers: ReviewerReceipt[];
+  candidates?: CandidateReceipt[];
   deterministicChecks: CheckReceipt[];
   usage: UsageReceipt;
   createdAt: string;

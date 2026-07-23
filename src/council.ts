@@ -12,10 +12,20 @@
  * attempt, failure, or repair retry — is budget-reserved BEFORE dispatch.
  */
 import { GENERIC_REVIEW_SYSTEM_PROMPT, buildReviewPrompt, parseReviewResponse } from "./domain/generic.js";
+import { buildCandidatePrompt, CANDIDATE_SYSTEM_PROMPT } from "./candidates.js";
+import {
+  anonymizeCandidates,
+  buildJudgePrompt,
+  JUDGE_SYSTEM_PROMPT,
+  parseJudgeResponse,
+  selectWinner,
+  type ScoredCandidate,
+} from "./judge.js";
+import { buildFusionPrompt, FUSION_SYSTEM_PROMPT, parseFusionPlan } from "./fusion.js";
 import type { BudgetCoordinator, BudgetDecision, ResolveVectorConfig, ReviewerConfig } from "./policy.js";
 import { checkExternalBudget } from "./policy.js";
 import type { ResolveResult, ResolvedReviewer, ReviewerOutput } from "./providers.js";
-import type { CouncilVerdict, EvidenceItem, ReviewerReceipt, VerdictStatus } from "./receipts.js";
+import type { CandidateReceipt, CheckReceipt, CouncilVerdict, EvidenceItem, Finding, ReviewerReceipt, VerdictStatus } from "./receipts.js";
 import { newReceiptId, redactSecrets } from "./receipts.js";
 
 export interface CouncilDeps {
@@ -98,6 +108,21 @@ async function reviewWith(
   // Secrets never cross the external transport boundary, even inside prompts.
   const transportPrompt = resolved.config.local ? buildReviewPrompt(input) : redactSecrets(buildReviewPrompt(input));
   let calls = 0;
+  // Every external call — the initial attempt included — is budget-reserved
+  // BEFORE dispatch.
+  if (!resolved.config.local) {
+    const initial = await reserveExternal();
+    if (!initial.allowed) {
+      return {
+        ...base,
+        status: "skipped_budget",
+        calls: 0,
+        findings: [],
+        latencyMs: 0,
+        error: initial.reason ?? "budget reached",
+      };
+    }
+  }
   try {
     calls += 1;
     const output = await deps.complete(resolved, GENERIC_REVIEW_SYSTEM_PROMPT, transportPrompt, deps.signal);
@@ -200,23 +225,32 @@ async function mapLimited<T, R>(items: readonly T[], limit: number, fn: (item: T
   return results;
 }
 
-export async function runCouncil(input: RunCouncilInput): Promise<CouncilVerdict> {
-  const { config, deps } = input;
-  const now = deps.now ?? Date.now;
-  const startedAt = now();
-  const receipts: ReviewerReceipt[] = [];
+interface PreparedSeats {
+  runnable: ResolvedReviewer[];
+  receipts: ReviewerReceipt[];
+}
 
+/**
+ * Shared seat preparation for all council modes: eligibility, resolution,
+ * and cross-family enforcement. Budget is NOT touched here — reservations
+ * happen per CALL at dispatch time, so seats that never fire cost nothing.
+ */
+async function prepareSeats(
+  config: ResolveVectorConfig,
+  deps: CouncilDeps,
+  primaryFamily: string | undefined,
+): Promise<PreparedSeats> {
+  const receipts: ReviewerReceipt[] = [];
   const eligible: ReviewerConfig[] = [];
   for (const reviewer of config.reviewers) {
     if (!reviewer.enabled) continue;
-    if (reviewer.trigger === "escalation") continue; // M1: escalation seats stay cold
+    if (reviewer.trigger === "escalation") continue; // escalation seats stay cold until M4
     eligible.push(reviewer);
   }
 
   const resolved = await mapLimited(eligible, config.maxConcurrentReviewers, (reviewer) => deps.resolveReviewer(reviewer));
 
   const runnable: ResolvedReviewer[] = [];
-  const reservations = new Map<string, () => BudgetDecision | Promise<BudgetDecision>>();
   for (let i = 0; i < eligible.length; i++) {
     const result: ResolveResult = resolved[i];
     const reviewerConfig = eligible[i];
@@ -224,7 +258,7 @@ export async function runCouncil(input: RunCouncilInput): Promise<CouncilVerdict
       receipts.push(skippedReceipt(reviewerConfig, "error", result.detail));
       continue;
     }
-    if (input.primaryFamily && result.reviewer.family === input.primaryFamily) {
+    if (primaryFamily && result.reviewer.family === primaryFamily) {
       receipts.push(
         skippedReceipt(
           reviewerConfig,
@@ -234,24 +268,30 @@ export async function runCouncil(input: RunCouncilInput): Promise<CouncilVerdict
       );
       continue;
     }
-    if (!reviewerConfig.local) {
-      // Reserve BEFORE dispatch; the attempt counts whether or not it succeeds.
-      const reserve = (): BudgetDecision | Promise<BudgetDecision> =>
-        deps.budget
-          ? deps.budget.tryReserve(now())
-          : checkExternalBudget(config, deps.externalTimestamps ?? [], now());
-      const decision = await reserve();
-      if (!decision.allowed) {
-        receipts.push(skippedReceipt(reviewerConfig, "skipped_budget", decision.reason ?? "budget reached"));
-        continue;
-      }
-      reservations.set(reviewerConfig.id, reserve);
-    }
     runnable.push(result.reviewer);
   }
+  return { runnable, receipts };
+}
 
-  const runReceipts = await mapLimited(runnable, config.maxConcurrentReviewers, (reviewer) =>
-    reviewWith(reviewer, input, deps, reservations.get(reviewer.config.id) ?? (() => ({ allowed: true }))),
+/** Per-call budget reservation closure (reservations are global, not per-seat). */
+function reserveFor(config: ResolveVectorConfig, deps: CouncilDeps): () => BudgetDecision | Promise<BudgetDecision> {
+  const now = deps.now ?? Date.now;
+  return () =>
+    deps.budget
+      ? deps.budget.tryReserve(now())
+      : checkExternalBudget(config, deps.externalTimestamps ?? [], now());
+}
+
+export async function runCouncil(input: RunCouncilInput): Promise<CouncilVerdict> {
+  const { config, deps } = input;
+  const now = deps.now ?? Date.now;
+  const startedAt = now();
+
+  const seats = await prepareSeats(config, deps, input.primaryFamily);
+  const receipts: ReviewerReceipt[] = [...seats.receipts];
+
+  const runReceipts = await mapLimited(seats.runnable, config.maxConcurrentReviewers, (reviewer) =>
+    reviewWith(reviewer, input, deps, reserveFor(config, deps)),
   );
   receipts.push(...runReceipts);
 
@@ -278,4 +318,330 @@ export async function runCouncil(input: RunCouncilInput): Promise<CouncilVerdict
     },
     createdAt: new Date(startedAt).toISOString(),
   };
+}
+
+/* ──────────────────────────── ensemble modes ──────────────────────────── */
+
+export interface RunEnsembleInput {
+  mode: "best" | "fusion" | "compare";
+  goal: string;
+  constraints?: string[];
+  evidence?: EvidenceItem[];
+  candidateCount: number;
+  /** Live family token of the primary model; same-family seats are skipped. */
+  primaryFamily?: string;
+  config: ResolveVectorConfig;
+  deps: EnsembleDeps;
+}
+
+export interface EnsembleDeps extends CouncilDeps {
+  /** Injected for tests: drives anonymization shuffling. */
+  rng?: () => number;
+  /** Objective pre-judge checks; a failure disqualifies the candidate. */
+  checks?: (candidate: { anonId: string; text: string }) => CheckReceipt[];
+}
+
+class BudgetExceeded extends Error {}
+
+/** One transport call for generation/judge/fusion, with redaction + receipt. */
+async function callSeat(
+  seat: ResolvedReviewer,
+  systemPrompt: string,
+  rawPrompt: string,
+  deps: CouncilDeps,
+  reserve: () => BudgetDecision | Promise<BudgetDecision>,
+  started: () => number,
+): Promise<{ output?: ReviewerOutput; receipt: ReviewerReceipt }> {
+  const base = {
+    reviewerId: seat.config.id,
+    provider: seat.model.provider,
+    model: seat.model.id,
+    family: seat.family,
+    local: seat.config.local,
+  };
+  if (!seat.config.local) {
+    const decision = await reserve();
+    if (!decision.allowed) throw new BudgetExceeded(decision.reason ?? "budget reached");
+  }
+  const prompt = seat.config.local ? rawPrompt : redactSecrets(rawPrompt);
+  const t0 = started();
+  try {
+    const output = await deps.complete(seat, systemPrompt, prompt, deps.signal);
+    return {
+      output,
+      receipt: { ...base, status: "ok", calls: 1, findings: [], latencyMs: started() - t0, usage: output.usage },
+    };
+  } catch (error) {
+    const message = (error as Error).message;
+    const isTimeout = /timed?\s*out|timeout|aborted/i.test(message) || (error as Error).name === "TimeoutError";
+    return {
+      receipt: {
+        ...base,
+        status: isTimeout ? "timeout" : "error",
+        calls: 1,
+        findings: [],
+        latencyMs: started() - t0,
+        error: message,
+      },
+    };
+  }
+}
+
+/** Role-preferred seat picker; falls back to the first runnable seat. */
+function pickSeat(runnable: readonly ResolvedReviewer[], roles: readonly string[]): ResolvedReviewer | undefined {
+  for (const role of roles) {
+    const seat = runnable.find((r) => r.config.role === role);
+    if (seat) return seat;
+  }
+  return runnable[0];
+}
+
+function ensembleUsage(receipts: readonly (ReviewerReceipt | CandidateReceipt)[], totalLatencyMs: number) {
+  return {
+    input: receipts.reduce((sum, r) => sum + (r.usage?.input ?? 0), 0),
+    output: receipts.reduce((sum, r) => sum + (r.usage?.output ?? 0), 0),
+    totalLatencyMs,
+  };
+}
+
+export async function runEnsemble(input: RunEnsembleInput): Promise<CouncilVerdict> {
+  const { config, deps } = input;
+  const now = deps.now ?? Date.now;
+  const startedAt = now();
+  const rng = deps.rng ?? Math.random;
+  const reviewerReceipts: ReviewerReceipt[] = [];
+  const candidateReceipts: CandidateReceipt[] = [];
+  const allChecks: CheckReceipt[] = [];
+
+  const unavailable = (summary: string): CouncilVerdict => ({
+    id: newReceiptId(startedAt),
+    mode: input.mode,
+    status: "review_unavailable",
+    summary,
+    findings: [],
+    reviewers: reviewerReceipts,
+    candidates: candidateReceipts,
+    deterministicChecks: allChecks,
+    usage: ensembleUsage([...reviewerReceipts, ...candidateReceipts], now() - startedAt),
+    createdAt: new Date(startedAt).toISOString(),
+  });
+
+  // 1. Seats: resolution + cross-family + budget, shared with review mode.
+  const seats = await prepareSeats(config, deps, input.primaryFamily);
+  reviewerReceipts.push(...seats.receipts);
+  const generators = seats.runnable.slice(0, input.candidateCount);
+  if (generators.length < 2) {
+    return unavailable(`ensemble needs at least 2 runnable generator seats; got ${generators.length}`);
+  }
+
+  try {
+    // 2. Independent generation (isolated prompts — no cross-anchoring).
+    const generated = await mapLimited(generators, config.maxConcurrentReviewers, async (seat) => {
+      const t0 = now();
+      const prompt = buildCandidatePrompt(input);
+      const { output, receipt } = await callSeat(
+        seat,
+        CANDIDATE_SYSTEM_PROMPT,
+        prompt,
+        deps,
+        reserveFor(config, deps),
+        now,
+      );
+      const candidate: CandidateReceipt = { ...receipt, anonId: "", latencyMs: now() - t0 };
+      candidateReceipts.push(candidate);
+      return output ? { seatId: seat.config.id, text: output.text, receipt: candidate } : undefined;
+    });
+    const okCandidates = generated.filter((c): c is NonNullable<typeof c> => c !== undefined);
+    if (okCandidates.length < 2) {
+      return unavailable(`ensemble needs at least 2 generated candidates; got ${okCandidates.length}`);
+    }
+
+    // 3. Anonymize + shuffle; the judge never sees seat identity.
+    const anon = anonymizeCandidates(
+      okCandidates.map((c) => ({ seatId: c.seatId, text: c.text })),
+      rng,
+    );
+    for (const candidate of anon) {
+      const receipt = okCandidates.find((c) => c.seatId === candidate.seatId)?.receipt;
+      if (receipt) receipt.anonId = candidate.anonId;
+    }
+
+    // 4. Deterministic checks BEFORE judging; failures disqualify.
+    const checksByAnon = new Map<string, CheckReceipt[]>();
+    for (const candidate of anon) {
+      const checks = deps.checks?.(candidate) ?? [];
+      checksByAnon.set(candidate.anonId, checks);
+      for (const check of checks) allChecks.push({ ...check, name: `${candidate.anonId}:${check.name}` });
+      const disqualified = checks.some((check) => !check.passed);
+      const receipt = candidateReceipts.find((r) => r.anonId === candidate.anonId);
+      if (receipt) receipt.disqualified = disqualified;
+    }
+
+    // 5. Blind judging (also used by compare).
+    const judgeSeat = pickSeat(seats.runnable, ["judge"]);
+    if (!judgeSeat) return unavailable("no runnable seat available for judging");
+    const judgeCall = await callSeat(
+      judgeSeat,
+      JUDGE_SYSTEM_PROMPT,
+      buildJudgePrompt(input.goal, input.constraints, anon),
+      deps,
+      reserveFor(config, deps),
+      now,
+    );
+    reviewerReceipts.push(judgeCall.receipt);
+    if (!judgeCall.output) return unavailable(`judge call failed: ${judgeCall.receipt.error ?? "unknown"}`);
+    const judgeScores = parseJudgeResponse(judgeCall.output.text);
+
+    const scored: ScoredCandidate[] = anon.map((candidate) => {
+      const entry = judgeScores.find((s) => s.candidate === candidate.anonId);
+      const checks = checksByAnon.get(candidate.anonId) ?? [];
+      const disqualified = checks.some((check) => !check.passed);
+      const total = entry
+        ? Object.values(entry.scores).reduce((sum, value) => sum + value, 0)
+        : 0;
+      const receipt = candidateReceipts.find((r) => r.anonId === candidate.anonId);
+      if (receipt) receipt.total = total;
+      return {
+        anonId: candidate.anonId,
+        seatId: candidate.seatId,
+        scores: entry?.scores ?? { intent: 0, correctness: 0, completeness: 0, evidence: 0, reasoning: 0, constraints: 0, practicality: 0 },
+        total,
+        note: entry?.note ?? (entry ? undefined : "not scored by judge"),
+        checks,
+        disqualified,
+      };
+    });
+
+    const findings: Finding[] = scored.flatMap((candidate) => {
+      const entries: Finding[] = candidate.checks
+        .filter((check) => !check.passed)
+        .map((check) => ({
+          severity: "high" as const,
+          category: "constraint" as const,
+          claim: `${candidate.anonId} failed objective check ${check.name}`,
+          concern: check.detail ?? "deterministic check failed",
+          evidence: [],
+        }));
+      if (candidate.note) {
+        entries.push({
+          severity: "info" as const,
+          category: "other" as const,
+          claim: `${candidate.anonId} (total ${candidate.total}/35${candidate.disqualified ? ", disqualified" : ""})`,
+          concern: candidate.note,
+          evidence: [],
+        });
+      }
+      return entries;
+    });
+
+    if (input.mode === "compare") {
+      // Compare never selects: alternatives + tradeoffs, decision stays human.
+      const anyQualified = scored.some((candidate) => !candidate.disqualified);
+      return {
+        id: newReceiptId(startedAt),
+        mode: "compare",
+        status: anyQualified ? "pass" : "fail",
+        summary: scored
+          .map((candidate) => `${candidate.anonId}: ${candidate.total}/35${candidate.disqualified ? " (disqualified)" : ""} — ${candidate.note ?? "no note"}`)
+          .join(" | "),
+        findings,
+        reviewers: reviewerReceipts,
+        candidates: candidateReceipts,
+        deterministicChecks: allChecks,
+        usage: ensembleUsage([...reviewerReceipts, ...candidateReceipts], now() - startedAt),
+        createdAt: new Date(startedAt).toISOString(),
+      };
+    }
+
+    if (input.mode === "best") {
+      const outcome = selectWinner(scored);
+      const status: VerdictStatus =
+        outcome.outcome === "winner" ? "pass" : outcome.outcome === "split" ? "split" : "fail";
+      const winner = outcome.outcome === "winner" ? anon.find((c) => c.anonId === outcome.anonId) : undefined;
+      return {
+        id: newReceiptId(startedAt),
+        mode: "best",
+        status,
+        summary:
+          outcome.outcome === "winner"
+            ? `best-of-${anon.length}: ${outcome.anonId} wins (${scored.find((s) => s.anonId === outcome.anonId)?.total}/35)`
+            : outcome.outcome === "split"
+              ? `best-of-${anon.length}: tie for first — human tiebreak needed`
+              : `best-of-${anon.length}: every candidate failed objective checks`,
+        findings,
+        selectedCandidateId: outcome.outcome === "winner" ? outcome.anonId : undefined,
+        finalAnswer: winner?.text,
+        reviewers: reviewerReceipts,
+        candidates: candidateReceipts,
+        deterministicChecks: allChecks,
+        usage: ensembleUsage([...reviewerReceipts, ...candidateReceipts], now() - startedAt),
+        createdAt: new Date(startedAt).toISOString(),
+      };
+    }
+
+    // 6. Fusion: conflict-aware synthesis, then one final independent review.
+    const fusionSeat = pickSeat(seats.runnable, ["fusion", "judge"]);
+    if (!fusionSeat) return unavailable("no runnable seat available for fusion");
+    const fusionCall = await callSeat(
+      fusionSeat,
+      FUSION_SYSTEM_PROMPT,
+      buildFusionPrompt(input.goal, input.constraints, anon),
+      deps,
+      reserveFor(config, deps),
+      now,
+    );
+    reviewerReceipts.push(fusionCall.receipt);
+    if (!fusionCall.output) return unavailable(`fusion call failed: ${fusionCall.receipt.error ?? "unknown"}`);
+    const plan = parseFusionPlan(fusionCall.output.text);
+
+    for (const conflict of plan.unresolved) {
+      findings.push({
+        severity: "medium",
+        category: "other",
+        claim: `unresolved conflict: ${conflict.topic}`,
+        concern: conflict.positions.map((p) => `${p.candidate}: ${p.claim}`).join(" vs "),
+        evidence: [],
+      });
+    }
+
+    const reviewSeat = pickSeat(seats.runnable, ["verifier", "method"]) ?? fusionSeat;
+    const reviewReceipt = await reviewWith(
+      reviewSeat,
+      {
+        goal: input.goal,
+        proposal: plan.finalAnswer,
+        constraints: input.constraints,
+        evidence: input.evidence,
+        config,
+        deps,
+      },
+      deps,
+      reserveFor(config, deps),
+    );
+    reviewerReceipts.push(reviewReceipt);
+    const reviewFindings = reviewReceipt.findings;
+    const status: VerdictStatus =
+      reviewReceipt.status !== "ok"
+        ? "insufficient_evidence"
+        : ((reviewReceipt.verdict ?? "insufficient_evidence") as VerdictStatus);
+
+    return {
+      id: newReceiptId(startedAt),
+      mode: "fusion",
+      status,
+      summary: `fusion of ${anon.length}: ${plan.agreements.length} agreements, ${plan.selectedClaims.length} resolved, ${plan.unresolved.length} unresolved · final review: ${status}`,
+      findings: [...findings, ...reviewFindings],
+      finalAnswer: plan.finalAnswer,
+      reviewers: reviewerReceipts,
+      candidates: candidateReceipts,
+      deterministicChecks: allChecks,
+      usage: ensembleUsage([...reviewerReceipts, ...candidateReceipts], now() - startedAt),
+      createdAt: new Date(startedAt).toISOString(),
+    };
+  } catch (error) {
+    if (error instanceof BudgetExceeded) {
+      return unavailable(`external budget exhausted mid-ensemble: ${error.message}`);
+    }
+    throw error;
+  }
 }
