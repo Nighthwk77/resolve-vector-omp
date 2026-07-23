@@ -313,6 +313,39 @@ test("reset during an in-flight pass: stale completion cannot overwrite fresh st
   assert.equal(h.controller.reviewState.reviewing, false);
 });
 
+test("split: terminal escalation — no correction, no round, clean state", async () => {
+  const h = makeHarness("always", { maxRevisionRounds: 2 });
+  h.setVerdicts([verdict("split", "qwen says pass, kimi says fail")]);
+  await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  assert.equal(h.corrections.length, 0, "split must never send a hidden correction");
+  assert.equal(h.controller.reviewState.revisionRound, 0, "split must not increment revisionRound");
+  assert.equal(h.controller.reviewState.pendingCorrectionId, undefined);
+  assert.ok(h.notifications.some((n) => n.includes("split verdict — user decision needed")));
+});
+
+test("split mid-loop clears correction state; a later normal turn starts cleanly", async () => {
+  const h = makeHarness("always", { maxRevisionRounds: 2 });
+  h.setVerdicts([verdict("concern"), verdict("split"), verdict("pass")]);
+  // Round 1: concern → correction pending.
+  await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  assert.equal(h.corrections.length, 1);
+  assert.equal(h.controller.reviewState.revisionRound, 1);
+  // The revision turn comes back SPLIT: loop must stop without correcting.
+  await h.controller.onAgentEnd(correctionTurn(h.corrections[0].id), ctx);
+  assert.equal(h.corrections.length, 1, "split must not send another correction");
+  assert.equal(h.controller.reviewState.revisionRound, 0, "split resets the loop");
+  assert.equal(h.controller.reviewState.pendingCorrectionId, undefined);
+  assert.ok(h.notifications.some((n) => n.includes("user decision needed")));
+  // A later normal user turn starts cleanly — no stale loop state.
+  h.setLeaf("leaf-9");
+  h.setProposal("a fresh unrelated answer, definitely long enough to review");
+  await h.controller.onAgentEnd(assistantTurn("a fresh unrelated answer, definitely long enough to review"), ctx);
+  assert.equal(h.reviews.length, 3);
+  assert.equal(h.reviews[2].activationReason, "agent_end");
+  assert.equal(h.reviews[2].revisionRound, 0);
+  assert.equal(h.corrections.length, 1);
+});
+
 test("buildCorrectionMessage cites findings and demands resolution", () => {
   const text = buildCorrectionMessage(verdict("fail"));
   assert.match(text, /FAIL/);

@@ -45,6 +45,23 @@ function renderReviewer(reviewer: ReviewerReceipt): string {
   return `  ✓ ${reviewer.reviewerId} (${reviewer.provider}/${reviewer.model}, ${where}) → ${reviewer.verdict} · ${reviewer.latencyMs}ms${usage}`;
 }
 
+/** Split presentation: the competing conclusions and material disagreements. */
+export function renderSplitDetail(verdict: CouncilVerdict): string {
+  const lines: string[] = ["RV · split — reviewers disagree:"];
+  for (const reviewer of verdict.reviewers) {
+    if (reviewer.status !== "ok") continue;
+    lines.push(`  ${reviewer.reviewerId} → ${reviewer.verdict}${reviewer.summary ? `: ${reviewer.summary}` : ""}`);
+  }
+  if (verdict.findings.length > 0) {
+    lines.push("material disagreements:");
+    for (const finding of verdict.findings.slice(0, 5)) {
+      lines.push(`  [${finding.severity}/${finding.category}] ${finding.claim} — ${finding.concern}`);
+    }
+  }
+  lines.push("RV takes no side. Review the positions above and decide.");
+  return lines.join("\n");
+}
+
 /** Full verdict block for `/rv review` output. */
 export function renderVerdict(verdict: CouncilVerdict): string {
   const lines: string[] = [

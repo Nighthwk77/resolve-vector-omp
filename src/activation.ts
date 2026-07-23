@@ -20,7 +20,7 @@
 import type { ExtensionContext, SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import type { ActivationMode, ResolveVectorConfig } from "./policy.js";
 import type { CouncilVerdict, Finding } from "./receipts.js";
-import { renderStatusLine } from "./render.js";
+import { renderSplitDetail, renderStatusLine } from "./render.js";
 import type { RVEngine } from "./runtime.js";
 
 /** Marker on the hidden corrective message; also how we recognize our own turns. */
@@ -316,6 +316,17 @@ export class ActivationController {
         this.state.revisionRound = 0;
         this.deps.notify(ctx, renderStatusLine(verdict), "warning");
         return;
+      case "split": {
+        // Terminal escalation, never a correction request: RV does not know
+        // which side is right, so the loop STOPS and the human decides. No
+        // hidden correction, no revision round, no fused middle ground.
+        this.state.revisionRound = 0;
+        this.state.pendingCorrectionId = undefined;
+        this.state.pendingTurn = undefined;
+        this.deps.notify(ctx, "RV · split verdict — user decision needed", "warning");
+        this.deps.notify(ctx, renderSplitDetail(verdict), "info");
+        return;
+      }
       default: {
         if (this.state.revisionRound < max) {
           this.state.revisionRound += 1;
