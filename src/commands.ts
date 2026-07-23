@@ -1,8 +1,10 @@
 /**
  * `/rv` slash-command routing. Every subcommand funnels into RVRuntime —
  * manual review and (later) automatic activation share the engine and receipts.
+ * Plan-gate subcommands (proceed/revise/dismiss/details) route to the
+ * ActivationController facade registered alongside.
  */
-import type { ExtensionCommandContext, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionCommandContext, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { lastExchangeFromEntries } from "./activation.js";
 import type { CouncilProgressEvent } from "./council.js";
 import { formatDoctorChecks, runDoctorChecks } from "./doctor.js";
@@ -14,6 +16,13 @@ import { renderStatusLine, renderVerdict } from "./render.js";
 import type { RVEngine } from "./runtime.js";
 import { detailedGlmUsage, fetchGlmUsage } from "./provider-usage.js";
 import { runSetupWizard } from "./setup.js";
+
+/** Plan-gate facade the ActivationController implements for gate subcommands. */
+export interface ReviewFlowGate {
+  proceedWithPlan: (ctx: ExtensionContext, instructions?: string) => void;
+  dismissGate: (ctx: ExtensionContext) => void;
+  gateDetails: (ctx: ExtensionContext) => void;
+}
 
 /** "A and B" / "A, B and C" — the progress-line roster format. */
 function formatReviewerList(ids: readonly string[]): string {
@@ -188,9 +197,27 @@ async function cmdReviewerRetry(runtime: RVEngine, ctx: ExtensionCommandContext,
   }
 }
 
-async function dispatch(runtime: RVEngine, args: string, ctx: ExtensionCommandContext, ompVersion: string): Promise<void> {
+async function dispatch(runtime: RVEngine, args: string, ctx: ExtensionCommandContext, ompVersion: string, gate?: ReviewFlowGate): Promise<void> {
   const [sub = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
   switch (sub) {
+    case "proceed":
+      if (!gate) return ctx.ui.notify("RV · review flow not active in this session", "warning");
+      return gate.proceedWithPlan(ctx as unknown as ExtensionContext);
+    case "revise": {
+      if (!gate) return ctx.ui.notify("RV · review flow not active in this session", "warning");
+      const instructions = rest.join(" ");
+      if (!instructions) {
+        ctx.ui.notify("RV · usage: /rv revise <instructions> — execute the plan with your steering", "warning");
+        return;
+      }
+      return gate.proceedWithPlan(ctx as unknown as ExtensionContext, instructions);
+    }
+    case "dismiss":
+      if (!gate) return ctx.ui.notify("RV · review flow not active in this session", "warning");
+      return gate.dismissGate(ctx as unknown as ExtensionContext);
+    case "details":
+      if (!gate) return ctx.ui.notify("RV · review flow not active in this session", "warning");
+      return gate.gateDetails(ctx as unknown as ExtensionContext);
     case "status":
       return cmdStatus(runtime, ctx, rest.includes("probe"));
     case "doctor":
@@ -258,20 +285,20 @@ async function dispatch(runtime: RVEngine, args: string, ctx: ExtensionCommandCo
       return;
     }
     default:
-      ctx.ui.notify(`RV · unknown subcommand "${sub}". Try: setup, status, usage, doctor, review, reviewer retry <id>, on, off, config`, "warning");
+      ctx.ui.notify(`RV · unknown subcommand "${sub}". Try: setup, status, usage, doctor, review, reviewer retry <id>, proceed, revise, dismiss, details, on, off, config`, "warning");
   }
 }
 
-export function registerRvCommand(pi: ExtensionAPI, runtime: RVEngine): void {
+export function registerRvCommand(pi: ExtensionAPI, runtime: RVEngine, gate?: ReviewFlowGate): void {
   // Read through the injected namespace: a static value import of VERSION from
   // the package root would eagerly load omp's native addons in plain tests.
   const ompVersion: string = (pi.pi as { VERSION?: string } | undefined)?.VERSION ?? "unknown";
   pi.registerCommand("rv", {
-    description: "Resolve Vector — cross-model review (setup | status [probe] | usage | doctor [probe] | review | reviewer retry <id> | on [mode] | off | config)",
+    description: "Resolve Vector — cross-model review (setup | status [probe] | usage | doctor [probe] | review | reviewer retry <id> | proceed | revise <i> | dismiss | details | on [mode] | off | config)",
     getArgumentCompletions: (prefix) => {
-      const subs = ["setup", "status", "usage", "doctor", "review", "reviewer", "on", "off", "config", "best", "fuse", "compare"];
+      const subs = ["setup", "status", "usage", "doctor", "review", "reviewer", "proceed", "revise", "dismiss", "details", "on", "off", "config", "best", "fuse", "compare"];
       return subs.filter((s) => s.startsWith(prefix)).map((s) => ({ label: s, value: s }));
     },
-    handler: (args, ctx) => dispatch(runtime, args, ctx, ompVersion),
+    handler: (args, ctx) => dispatch(runtime, args, ctx, ompVersion, gate),
   });
 }

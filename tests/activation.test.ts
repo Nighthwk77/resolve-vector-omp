@@ -4,8 +4,12 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
   ActivationController,
   analyzeTurn,
-  buildCorrectionMessage,
+  buildExecutionMessage,
+  buildPlanMessage,
+  buildSteeringContext,
   RV_CORRECTION_TYPE,
+  RV_PLAN_TYPE,
+  RV_STEERING_TYPE,
   shouldActivate,
   type ActivationDeps,
 } from "../src/activation.js";
@@ -54,6 +58,21 @@ function correctionTurn(correctionId: string, revisedText = "the revised answer,
   ];
 }
 
+function planTurn(planId: string, planText = "1. fix the arithmetic\n2. restate the result"): unknown[] {
+  return [
+    { role: "custom", customType: RV_PLAN_TYPE, content: [], details: { planId } },
+    ...assistantTurn(planText),
+  ];
+}
+
+function steeringTurn(correctionId: string, userText: string, revisedText = "the steered answer, long enough to matter"): unknown[] {
+  return [
+    { role: "custom", customType: RV_STEERING_TYPE, content: [], details: { correctionId } },
+    { role: "user", content: [{ type: "text", text: userText }] },
+    ...assistantTurn(revisedText),
+  ];
+}
+
 interface VerdictGate {
   promise: Promise<CouncilVerdict>;
   resolve: (value: CouncilVerdict) => void;
@@ -67,6 +86,7 @@ interface Harness {
   signals: (AbortSignal | undefined)[];
   notifications: string[];
   corrections: { text: string; id: string }[];
+  plans: { text: string; planId: string; correctionId: string }[];
   setVerdicts: (verdicts: CouncilVerdict[]) => void;
   setProposal: (proposal: string) => void;
   setLeaf: (leaf: string) => void;
@@ -79,6 +99,7 @@ function makeHarness(mode: ResolveVectorConfig["mode"], overrides: Partial<Resol
   const signals: (AbortSignal | undefined)[] = [];
   const notifications: string[] = [];
   const corrections: { text: string; id: string }[] = [];
+  const plans: { text: string; planId: string; correctionId: string }[] = [];
   const queue: (CouncilVerdict | Promise<CouncilVerdict>)[] = [];
   let proposal = "the completed answer under review, long enough to matter";
   let leaf = "leaf-1";
@@ -104,6 +125,7 @@ function makeHarness(mode: ResolveVectorConfig["mode"], overrides: Partial<Resol
   const deps: ActivationDeps = {
     notify: (_ctx, message) => notifications.push(message),
     sendCorrection: (text, id) => corrections.push({ text, id }),
+    sendPlan: (text, planId, correctionId) => plans.push({ text, planId, correctionId }),
     leafEntryId: () => leaf,
     lastExchange: () => ({ goal: "the goal", proposal }),
     primaryFamily: () => "glm",
@@ -116,6 +138,7 @@ function makeHarness(mode: ResolveVectorConfig["mode"], overrides: Partial<Resol
     signals,
     notifications,
     corrections,
+    plans,
     setVerdicts: (verdicts) => queue.push(...verdicts),
     setProposal: (next) => {
       proposal = next;
@@ -226,15 +249,17 @@ test("auto mode avoids trivial turns", () => {
   assert.equal(activate({ substantive: false, proposal: "Done." }), false); // not substantive
 });
 
-test("always mode reviews a substantive turn; pass renders verified, no correction", async () => {
+test("always mode reviews a substantive turn; pass renders verified, no plan, no correction", async () => {
   const h = makeHarness("always");
   h.setVerdicts([verdict("pass")]);
   await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
   assert.equal(h.reviews.length, 1);
   assert.equal(h.reviews[0].activationReason, "agent_end");
   assert.equal(h.corrections.length, 0);
+  assert.equal(h.plans.length, 0);
   assert.ok(h.notifications.some((n) => n.includes("verified")));
-  assert.ok(h.notifications.some((n) => n.includes("provisional")));
+  assert.ok(h.notifications.some((n) => n.includes("review started")));
+  assert.equal(h.controller.reviewState.awaitingUser, undefined);
 });
 
 test("off and manual modes never activate", async () => {
@@ -245,64 +270,186 @@ test("off and manual modes never activate", async () => {
   }
 });
 
-test("concern injects one hidden corrective nextTurn carrying a unique id", async () => {
+test("concern: verdict visible, ONE plan-only request, NO execution turn until the user acts", async () => {
   const h = makeHarness("always", { maxRevisionRounds: 2 });
   h.setVerdicts([verdict("concern")]);
   await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
-  assert.equal(h.corrections.length, 1);
-  assert.match(h.corrections[0].text, /CONCERN/);
-  assert.match(h.corrections[0].text, /2\+2=5/);
-  assert.match(h.corrections[0].text, /state 4/);
+  // No correction ever fires autonomously.
+  assert.equal(h.corrections.length, 0);
+  // Exactly one plan request, carrying plan + correction ids.
+  assert.equal(h.plans.length, 1);
+  assert.match(h.plans[0].text, /CONCERN/);
+  assert.match(h.plans[0].text, /2\+2=5/);
+  assert.match(h.plans[0].text, /PLAN ONLY/);
+  assert.match(h.plans[0].text, /forbidden this turn/);
+  // Verdict rendered visibly (findings block) before the plan.
+  assert.ok(h.notifications.some((n) => n.includes("remediation plan requested (round 1/2)")));
+  assert.ok(h.notifications.some((n) => n.includes("Resolve Vector review verdict: CONCERN")));
   assert.equal(h.controller.reviewState.revisionRound, 1);
-  assert.equal(h.controller.reviewState.pendingCorrectionId, h.corrections[0].id);
+  assert.equal(h.controller.reviewState.pendingPlan?.planId, h.plans[0].planId);
+  assert.equal(h.controller.reviewState.awaitingUser, undefined);
 });
 
-test("the correlated correction turn is reviewed exactly once as a revision", async () => {
+test("plan turn completion opens the user gate and captures the plan", async () => {
+  const h = makeHarness("always", { maxRevisionRounds: 2 });
+  h.setVerdicts([verdict("concern")]);
+  await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  const planId = h.plans[0].planId;
+  await h.controller.onAgentEnd(planTurn(planId), ctx);
+  const gate = h.controller.reviewState.awaitingUser;
+  assert.ok(gate, "gate must open when the plan turn ends");
+  assert.equal(gate.plan, "1. fix the arithmetic\n2. restate the result");
+  assert.equal(gate.correctionId, h.plans[0].correctionId);
+  assert.equal(h.controller.reviewState.pendingPlan, undefined);
+  // No review of the plan turn, no execution turn.
+  assert.equal(h.reviews.length, 1);
+  assert.equal(h.corrections.length, 0);
+  assert.ok(h.notifications.some((n) => n.includes("awaiting your decision")));
+});
+
+test("proceed: user-authorized execution carries findings + plan, reviewed once as revision", async () => {
   const h = makeHarness("always", { maxRevisionRounds: 2 });
   h.setVerdicts([verdict("concern"), verdict("pass")]);
   await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
-  const id = h.corrections[0].id;
-  await h.controller.onAgentEnd(correctionTurn(id), ctx);
+  const planId = h.plans[0].planId;
+  await h.controller.onAgentEnd(planTurn(planId), ctx);
+  h.controller.proceedWithPlan(ctx);
+  assert.equal(h.corrections.length, 1);
+  assert.match(h.corrections[0].text, /authorized execution/);
+  assert.match(h.corrections[0].text, /1\. fix the arithmetic/);
+  assert.equal(h.controller.reviewState.awaitingUser, undefined);
+  await h.controller.onAgentEnd(correctionTurn(h.corrections[0].id), ctx);
   assert.equal(h.reviews.length, 2);
   assert.equal(h.reviews[1].activationReason, "revision");
   assert.equal(h.reviews[1].revisionRound, 1);
   assert.equal(h.controller.reviewState.revisionRound, 0);
   assert.equal(h.controller.reviewState.pendingCorrectionId, undefined);
-  // The same marker turn again: consumed, never re-reviewed as a revision.
-  await h.controller.onAgentEnd(correctionTurn(id), ctx);
+  // The same marker turn again: consumed, never re-reviewed.
+  await h.controller.onAgentEnd(correctionTurn(h.corrections[0].id), ctx);
   assert.equal(h.reviews.length, 2);
 });
 
-test("a stale/uncorrelated rv-correction marker does not activate anything", async () => {
-  const h = makeHarness("always");
-  await h.controller.onAgentEnd(correctionTurn("rv-cor-9-9"), ctx);
-  assert.equal(h.reviews.length, 0);
-});
-
-test("a normal user turn while a correction is pending stays a normal turn", async () => {
+test("revise attaches user instructions to the execution turn", async () => {
   const h = makeHarness("always", { maxRevisionRounds: 2 });
-  h.setVerdicts([verdict("concern"), verdict("pass")]);
+  h.setVerdicts([verdict("fail")]);
   await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
-  const pendingId = h.controller.reviewState.pendingCorrectionId;
-  assert.ok(pendingId);
-  // User drives a brand-new turn BEFORE the hidden correction completes.
-  h.setLeaf("leaf-2");
-  h.setProposal("a brand-new unrelated user answer, also long enough");
-  await h.controller.onAgentEnd(assistantTurn("a brand-new unrelated user answer, also long enough"), ctx);
+  await h.controller.onAgentEnd(planTurn(h.plans[0].planId), ctx);
+  h.controller.proceedWithPlan(ctx, "keep the public API unchanged");
+  assert.equal(h.corrections.length, 1);
+  assert.match(h.corrections[0].text, /User steering instructions: keep the public API unchanged/);
+});
+
+test("dismiss closes the gate without any turn", async () => {
+  const h = makeHarness("always", { maxRevisionRounds: 2 });
+  h.setVerdicts([verdict("concern")]);
+  await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  await h.controller.onAgentEnd(planTurn(h.plans[0].planId), ctx);
+  h.controller.dismissGate(ctx);
+  assert.equal(h.controller.reviewState.awaitingUser, undefined);
+  assert.equal(h.controller.reviewState.pendingCorrectionId, undefined);
+  assert.equal(h.controller.reviewState.revisionRound, 0);
+  assert.equal(h.corrections.length, 0);
+  assert.ok(h.notifications.some((n) => n.includes("review dismissed")));
+});
+
+test("details reprints verdict and pending plan; gate commands are inert without a gate", async () => {
+  const h = makeHarness("always", { maxRevisionRounds: 2 });
+  h.controller.proceedWithPlan(ctx);
+  h.controller.dismissGate(ctx);
+  h.controller.gateDetails(ctx);
+  assert.ok(h.notifications.some((n) => n.includes("no pending review decision")));
+  h.setVerdicts([verdict("concern")]);
+  await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  await h.controller.onAgentEnd(planTurn(h.plans[0].planId), ctx);
+  const before = h.notifications.length;
+  h.controller.gateDetails(ctx);
+  assert.ok(h.notifications.slice(before).some((n) => n.includes("Resolve Vector review verdict: CONCERN")));
+  assert.ok(h.notifications.slice(before).some((n) => n.includes("1. fix the arithmetic")));
+});
+
+test("ordinary user text at the gate: steering attached, consumed, reviewed once as revision", async () => {
+  const h = makeHarness("always", { maxRevisionRounds: 2 });
+  h.setVerdicts([verdict("fail"), verdict("pass")]);
+  await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  await h.controller.onAgentEnd(planTurn(h.plans[0].planId), ctx);
+  const gate = h.controller.reviewState.awaitingUser;
+  assert.ok(gate);
+  // before_agent_start attaches findings + plan to the user's turn.
+  const result = h.controller.onBeforeAgentStart();
+  assert.ok(result && "message" in result && result.message);
+  const message = result.message as { customType: string; details: { correctionId: string }; content: { text: string }[] };
+  assert.equal(message.customType, RV_STEERING_TYPE);
+  assert.equal(message.details.correctionId, gate.correctionId);
+  assert.match(message.content[0].text, /2\+2=5/);
+  assert.match(message.content[0].text, /Pending remediation plan/);
+  // The steered turn completes: consumed, reviewed once as a revision.
+  await h.controller.onAgentEnd(steeringTurn(gate.correctionId, "go ahead and fix it"), ctx);
   assert.equal(h.reviews.length, 2);
-  assert.equal(h.reviews[1].activationReason, "agent_end"); // NOT a revision
-  assert.equal(h.reviews[1].proposal, "a brand-new unrelated user answer, also long enough");
-  assert.equal(h.controller.reviewState.pendingCorrectionId, pendingId); // still pending
+  assert.equal(h.reviews[1].activationReason, "revision");
+  assert.equal(h.controller.reviewState.awaitingUser, undefined);
+});
+
+test("steering that produces nothing substantive closes the gate without a review", async () => {
+  const h = makeHarness("always", { maxRevisionRounds: 2 });
+  h.setVerdicts([verdict("concern")]);
+  await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  await h.controller.onAgentEnd(planTurn(h.plans[0].planId), ctx);
+  const gate = h.controller.reviewState.awaitingUser;
+  await h.controller.onAgentEnd(steeringTurn(gate!.correctionId, "ok", "ok"), ctx);
+  assert.equal(h.reviews.length, 1);
+  assert.equal(h.controller.reviewState.awaitingUser, undefined);
+  assert.ok(h.notifications.some((n) => n.includes("gate closed")));
+});
+
+test("unrelated agent_end while the gate is open is ignored; gate survives", async () => {
+  const h = makeHarness("always", { maxRevisionRounds: 2 });
+  h.setVerdicts([verdict("concern")]);
+  await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  await h.controller.onAgentEnd(planTurn(h.plans[0].planId), ctx);
+  await h.controller.onAgentEnd(assistantTurn("some background completion, long enough to matter"), ctx);
+  assert.equal(h.reviews.length, 1);
+  assert.ok(h.controller.reviewState.awaitingUser);
+});
+
+test("onBeforeAgentStart is void when no gate is open", () => {
+  const h = makeHarness("always");
+  assert.equal(h.controller.onBeforeAgentStart(), undefined);
+});
+
+test("revision still fails: fresh plan and pause again — never chained autonomous corrections", async () => {
+  const h = makeHarness("always", { maxRevisionRounds: 2 });
+  h.setVerdicts([verdict("concern"), verdict("fail")]);
+  await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  await h.controller.onAgentEnd(planTurn(h.plans[0].planId), ctx);
+  h.controller.proceedWithPlan(ctx);
+  assert.equal(h.corrections.length, 1);
+  await h.controller.onAgentEnd(correctionTurn(h.corrections[0].id), ctx);
+  // Round 2: exactly one NEW plan request, zero new corrections, gate re-opens.
+  assert.equal(h.corrections.length, 1);
+  assert.equal(h.plans.length, 2);
+  assert.equal(h.controller.reviewState.revisionRound, 2);
+  assert.ok(h.notifications.some((n) => n.includes("remediation plan requested (round 2/2)")));
+  await h.controller.onAgentEnd(planTurn(h.plans[1].planId), ctx);
+  assert.ok(h.controller.reviewState.awaitingUser);
 });
 
 test("unresolved after maxRevisionRounds: loop stops and asks the user", async () => {
   const h = makeHarness("always", { maxRevisionRounds: 1 });
   h.setVerdicts([verdict("concern"), verdict("concern")]);
   await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  await h.controller.onAgentEnd(planTurn(h.plans[0].planId), ctx);
+  h.controller.proceedWithPlan(ctx);
   await h.controller.onAgentEnd(correctionTurn(h.corrections[0].id), ctx);
-  assert.equal(h.corrections.length, 1); // round 1 only; no second correction
+  assert.equal(h.plans.length, 1); // round 1 only; no second plan
+  assert.equal(h.corrections.length, 1);
   assert.equal(h.controller.reviewState.revisionRound, 0);
   assert.ok(h.notifications.some((n) => /unresolved after 1 revision round/.test(n)));
+});
+
+test("a stale/uncorrelated rv-correction marker does not activate anything", async () => {
+  const h = makeHarness("always");
+  await h.controller.onAgentEnd(correctionTurn("rv-cor-9-9"), ctx);
+  assert.equal(h.reviews.length, 0);
 });
 
 test("the same leaf entry is never reviewed twice", async () => {
@@ -378,18 +525,23 @@ test("split: terminal escalation — no correction, no round, clean state", asyn
   assert.ok(h.notifications.some((n) => n.includes("split verdict — user decision needed")));
 });
 
-test("split mid-loop clears correction state; a later normal turn starts cleanly", async () => {
+test("split mid-loop clears gate state; a later normal turn starts cleanly", async () => {
   const h = makeHarness("always", { maxRevisionRounds: 2 });
   h.setVerdicts([verdict("concern"), verdict("split"), verdict("pass")]);
-  // Round 1: concern → correction pending.
+  // Round 1: concern → plan gate (no correction yet).
   await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
-  assert.equal(h.corrections.length, 1);
+  assert.equal(h.plans.length, 1);
   assert.equal(h.controller.reviewState.revisionRound, 1);
+  await h.controller.onAgentEnd(planTurn(h.plans[0].planId), ctx);
+  h.controller.proceedWithPlan(ctx);
+  assert.equal(h.corrections.length, 1);
   // The revision turn comes back SPLIT: loop must stop without correcting.
   await h.controller.onAgentEnd(correctionTurn(h.corrections[0].id), ctx);
+  assert.equal(h.plans.length, 1, "split must not trigger another plan");
   assert.equal(h.corrections.length, 1, "split must not send another correction");
   assert.equal(h.controller.reviewState.revisionRound, 0, "split resets the loop");
   assert.equal(h.controller.reviewState.pendingCorrectionId, undefined);
+  assert.equal(h.controller.reviewState.awaitingUser, undefined);
   assert.ok(h.notifications.some((n) => n.includes("user decision needed")));
   // A later normal user turn starts cleanly — no stale loop state.
   h.setLeaf("leaf-9");
@@ -401,10 +553,59 @@ test("split mid-loop clears correction state; a later normal turn starts cleanly
   assert.equal(h.corrections.length, 1);
 });
 
-test("buildCorrectionMessage cites findings and demands resolution", () => {
-  const text = buildCorrectionMessage(verdict("fail"));
+test("review_unavailable: actionable message, never verified, no plan, no correction", async () => {
+  const h = makeHarness("always", { maxRevisionRounds: 2 });
+  const unavailable = verdict("review_unavailable", "No reviewer completed");
+  unavailable.reviewers = [
+    {
+      reviewerId: "fake-local",
+      provider: "fake-local",
+      model: "fake-qwen",
+      family: "qwen",
+      local: true,
+      status: "timeout",
+      calls: 1,
+      findings: [],
+      latencyMs: 3000,
+      failureCategory: "timeout_first_token",
+      error: "no meaningful token within 3s",
+      circuitState: "open",
+    },
+  ];
+  h.setVerdicts([unavailable]);
+  await h.controller.onAgentEnd(assistantTurn("a substantive answer long enough to matter"), ctx);
+  assert.equal(h.plans.length, 0);
+  assert.equal(h.corrections.length, 0);
+  assert.equal(h.controller.reviewState.awaitingUser, undefined);
+  assert.ok(!h.notifications.some((n) => n.startsWith("RV · verified")));
+  assert.ok(h.notifications.some((n) => n.includes("review unavailable")));
+  assert.ok(h.notifications.some((n) => n.includes("NOT verified")));
+  assert.ok(h.notifications.some((n) => n.includes("/rv doctor probe")));
+  assert.ok(h.notifications.some((n) => n.includes("No automatic correction will run")));
+});
+
+test("buildPlanMessage prohibits edits and mutating tools", () => {
+  const text = buildPlanMessage(verdict("fail"));
   assert.match(text, /FAIL/);
   assert.match(text, /\[high\/correctness\] 2\+2=5 — contradicts arithmetic/);
-  assert.match(text, /correction: state 4/);
-  assert.match(text, /Revise your answer/);
+  assert.match(text, /PLAN ONLY/);
+  assert.match(text, /edit\/write\/bash are forbidden this turn/);
+  assert.match(text, /Do NOT implement/);
+});
+
+test("buildExecutionMessage carries findings, plan, and authorization", () => {
+  const gate = { verdict: verdict("concern"), plan: "1. fix it" };
+  const text = buildExecutionMessage(gate, "be careful");
+  assert.match(text, /CONCERN/);
+  assert.match(text, /1\. fix it/);
+  assert.match(text, /User steering instructions: be careful/);
+  assert.match(text, /authorized execution/);
+});
+
+test("buildSteeringContext attaches findings and the pending plan", () => {
+  const gate = { verdict: verdict("fail"), plan: "1. fix it" };
+  const text = buildSteeringContext(gate);
+  assert.match(text, /FAIL/);
+  assert.match(text, /Pending remediation plan/);
+  assert.match(text, /steering/);
 });

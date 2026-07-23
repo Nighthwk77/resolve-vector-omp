@@ -33,7 +33,9 @@ export interface RuntimePaths {
 
 export function defaultPaths(agentDir: string): RuntimePaths {
   return {
-    configPath: join(agentDir, "resolve-vector.json"),
+    // RV_CONFIG_PATH: isolated-test override — point one OMP session at an
+    // alternate reviewer config without touching the live installation.
+    configPath: process.env.RV_CONFIG_PATH ?? join(agentDir, "resolve-vector.json"),
     receiptsPath: join(agentDir, "resolve-vector.receipts.jsonl"),
     ledgerPath: join(agentDir, "resolve-vector.budget.jsonl"),
   };

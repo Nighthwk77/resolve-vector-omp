@@ -12,8 +12,8 @@ export function renderStatusLine(verdict: CouncilVerdict): string {
   switch (verdict.status) {
     case "pass":
       return verdict.mode === "review"
-        ? `RV · verified${degraded}`
-        : `RV · ${verdict.mode} complete${verdict.selectedCandidateId ? ` — ${verdict.selectedCandidateId}` : ""}${degraded}`;
+        ? `RV · verified${degraded} · ${verdict.id}`
+        : `RV · ${verdict.mode} complete${verdict.selectedCandidateId ? ` — ${verdict.selectedCandidateId}` : ""}${degraded} · ${verdict.id}`;
     case "concern":
       return `RV · concern found (${verdict.findings.length} finding${verdict.findings.length === 1 ? "" : "s"})${degraded}`;
     case "fail":
@@ -23,8 +23,34 @@ export function renderStatusLine(verdict: CouncilVerdict): string {
     case "insufficient_evidence":
       return "RV · insufficient evidence to verify";
     case "review_unavailable":
-      return "RV · review unavailable (no reviewer completed)";
+      return `RV · review unavailable (no reviewer completed) · ${verdict.id}`;
   }
+}
+
+/** Actionable detail for review_unavailable: why, and what to do next. */
+export function renderUnavailableDetail(verdict: CouncilVerdict): string {
+  const lines: string[] = ["RV · review unavailable — the answer was NOT verified:"];
+  for (const reviewer of verdict.reviewers) {
+    lines.push(`  ${renderReviewer(reviewer)}`);
+  }
+  const actions: string[] = [];
+  if (verdict.reviewers.some((r) => r.local && r.status !== "ok")) {
+    const failed = verdict.reviewers.find((r) => r.local && r.status !== "ok");
+    actions.push(`restart the ${failed?.provider ?? "local"} service, then run /rv doctor probe`);
+  }
+  if (verdict.reviewers.some((r) => r.status === "skipped_budget")) {
+    actions.push("external budget is exhausted — wait for the window to roll (see /rv status)");
+  }
+  if (verdict.reviewers.some((r) => r.status === "skipped_same_family")) {
+    actions.push("a reviewer shares the primary model's family — switch model or add a cross-family seat");
+  }
+  if (verdict.reviewers.some((r) => !r.local && r.status !== "ok" && r.status !== "skipped_budget" && r.status !== "skipped_same_family")) {
+    actions.push("check the remote reviewer endpoint");
+  }
+  actions.push("retry with /rv review once a reviewer is healthy");
+  lines.push(`next: ${actions.join("; ")}.`);
+  lines.push("No automatic correction will run.");
+  return lines.join("\n");
 }
 
 export function renderReviewingLine(reviewerNames: readonly string[]): string {

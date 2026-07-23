@@ -6,6 +6,10 @@ Resolve Vector reads:
 ~/.omp/agent/resolve-vector.json
 ```
 
+Set `RV_CONFIG_PATH` in the environment of one OMP session to point it at an
+alternate config (isolated test setups) without touching the live file.
+Receipts and the budget ledger stay in the agent directory.
+
 ## Top-level settings
 
 | Field | Default | Meaning |
@@ -13,7 +17,7 @@ Resolve Vector reads:
 | `mode` | `"manual"` | `off`, `manual`, `auto`, `always`, or `sample` |
 | `defaultCouncilMode` | `"review"` | Default operation for model-driven calls |
 | `candidateCount` | `3` | Candidate count for ensemble modes |
-| `maxRevisionRounds` | `2` | Maximum automatic correction rounds |
+| `maxRevisionRounds` | `2` | Maximum plan-gate rounds (plan → user-authorized revision → re-review) |
 | `sampleRate` | `0.1` | Fraction selected in sample mode |
 | `runInBackground` | `true` | Run reviews without opening another interface |
 | `allowInteractiveWindows` | `false` | Reserved; keep false for headless behavior |

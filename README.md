@@ -75,19 +75,32 @@ primary is Kimi.
 ## What you see
 
 ```text
-RV · provisional
-RV · verified
+RV · review started — Qwen + Kimi
+RV · verified · rv-mry4u50r-1
 ```
 
 or, when a material problem is found:
 
 ```text
-RV · FAIL — 2 findings — revision requested (round 1/2)
+RV · FAIL — 1 finding — remediation plan requested (round 1/2)
+━━━ Resolve Vector review verdict: FAIL ━━━
+…findings, reviewer seats, receipt id…
+<the primary model's plan-only remediation turn, shown as normal output>
+RV · awaiting your decision — /rv proceed · /rv revise <instructions> · /rv dismiss · /rv details
 ```
 
-The correction is delivered as a hidden next turn. The primary model revises
-its answer and RV checks it again. Revision rounds are bounded; unresolved
-results stop and return control to you.
+RV never corrects autonomously. On `concern`/`fail` it shows the verdict and
+findings, asks the primary model for ONE plan-only turn (no edits, no
+mutating tools), displays the plan, and stops. Execution happens only when
+you choose it: `/rv proceed` runs the plan, `/rv revise <instructions>` runs
+it with your steering, `/rv dismiss` closes the review, `/rv details`
+reprints the verdict and plan. Ordinary text typed at the gate counts as
+steering — the findings and pending plan are attached to that turn.
+
+A user-authorized revision is reviewed exactly once. If it still fails, RV
+produces a fresh plan and pauses again, bounded by `maxRevisionRounds`;
+unresolved results stop and return control to you. A `pass`/`fail`
+disagreement becomes `split`: both sides shown, no side taken, no plan.
 
 ## Modes
 
@@ -144,7 +157,7 @@ status` tells you exactly which endpoint receives what.
 - **Compare** presents meaningful alternatives and leaves subjective decisions
   to you.
 - A `pass`/`fail` reviewer disagreement becomes `split`; no automatic
-  correction is triggered.
+  correction is triggered, no plan is requested — you decide.
 
 ## Update, rollback, and uninstall
 

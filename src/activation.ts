@@ -1,7 +1,7 @@
 /**
  * Completion-boundary activation: agent_end trigger policy, provisional
- * labeling, the corrective nextTurn loop, and the guards that keep RV from
- * ever reviewing its own review machinery.
+ * labeling, the plan-gated remediation loop, and the guards that keep RV
+ * from ever reviewing its own review machinery.
  *
  * M2.1 lifecycle hardening:
  * - GENERATIONS: every review captures a generation token. session_start /
@@ -16,15 +16,28 @@
  *   in a one-item pending slot (newest wins) and reviewed once when the
  *   current review drains. A pending completion superseded by a corrective
  *   revision is dropped WITH a notification, never silently.
+ *
+ * Plan gate (release blocker): on concern/fail RV no longer launches an
+ * autonomous correction. It renders the verdict and findings visibly, asks
+ * the primary model for ONE plan-only remediation turn (no edits, no
+ * mutating tools), displays that plan as normal output, and parks in
+ * `awaitingUser`. Only an explicit user action — /rv proceed, /rv revise,
+ * /rv dismiss, or ordinary steering text — produces the next turn. A
+ * user-authorized revision is reviewed exactly once; if it still fails, RV
+ * produces a fresh plan and pauses again (bounded by maxRevisionRounds).
  */
-import type { ExtensionContext, SessionEntry } from "@oh-my-pi/pi-coding-agent";
+import type { BeforeAgentStartEventResult, ExtensionContext, SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import type { ActivationMode, ResolveVectorConfig } from "./policy.js";
 import type { CouncilVerdict, Finding } from "./receipts.js";
-import { renderSplitDetail, renderStatusLine } from "./render.js";
+import { renderSplitDetail, renderStatusLine, renderUnavailableDetail, renderVerdict } from "./render.js";
 import type { RVEngine } from "./runtime.js";
 
 /** Marker on the hidden corrective message; also how we recognize our own turns. */
 export const RV_CORRECTION_TYPE = "rv-correction";
+/** Marker on the hidden plan-request message (plan-only turn, no mutations). */
+export const RV_PLAN_TYPE = "rv-plan";
+/** Marker on the hidden steering context attached to ordinary user turns at the gate. */
+export const RV_STEERING_TYPE = "rv-steering";
 
 export interface ReviewState {
   reviewing: boolean;
@@ -35,6 +48,10 @@ export interface ReviewState {
   pendingCorrectionId?: string;
   /** Newest completion waiting for the in-flight review; one slot, newest wins. */
   pendingTurn?: { reason: "agent_end" | "revision" };
+  /** Plan turn in flight (concern/fail); its completion opens the user gate. */
+  pendingPlan?: { planId: string; verdict: CouncilVerdict; correctionId: string };
+  /** Review paused for a user decision after a displayed plan. */
+  awaitingUser?: { verdict: CouncilVerdict; correctionId: string; round: number; plan?: string };
 }
 
 export interface TurnAnalysis {
@@ -49,16 +66,20 @@ export interface TurnAnalysis {
   researchToolsUsed: boolean;
   /** A council_audit ensemble ran this turn → output needs final verification. */
   ensembleOutput: boolean;
-  /** Turn contains an rv-correction marker → RV triggered it. */
+  /** Turn contains an rv-correction/rv-plan/rv-steering marker → RV triggered it. */
   isReviewTurn: boolean;
   /** Unique id of the correction this turn answers, if marked. */
   correctionId?: string;
+  /** Unique id of the plan request this turn answers, if marked. */
+  planId?: string;
 }
 
 export interface ActivationDeps {
   notify: (ctx: ExtensionContext, message: string, type?: "info" | "warning" | "error") => void;
   /** Hidden corrective injection: deliverAs nextTurn + triggerTurn, tagged with the id. */
   sendCorrection: (text: string, correctionId: string) => void;
+  /** Hidden plan-request injection: deliverAs nextTurn + triggerTurn, tagged with the plan id. */
+  sendPlan: (text: string, planId: string, correctionId: string) => void;
   leafEntryId: (ctx: ExtensionContext) => string | undefined;
   lastExchange: (ctx: ExtensionContext) => { goal?: string; proposal?: string };
   primaryFamily: (ctx: ExtensionContext) => string | undefined;
@@ -141,15 +162,26 @@ export function analyzeTurn(messages: readonly unknown[]): TurnAnalysis {
   let ensembleOutput = false;
   let isReviewTurn = false;
   let correctionId: string | undefined;
+  let planId: string | undefined;
   for (const message of messages) {
     if (typeof message !== "object" || message === null || !("role" in message)) continue;
-    if (message.role === "custom" && "customType" in message && message.customType === RV_CORRECTION_TYPE) {
-      isReviewTurn = true;
-      if ("details" in message && typeof message.details === "object" && message.details !== null && "correctionId" in message.details) {
-        const candidate = message.details.correctionId;
-        if (typeof candidate === "string") correctionId = candidate;
+    if (message.role === "custom" && "customType" in message) {
+      if (message.customType === RV_CORRECTION_TYPE || message.customType === RV_STEERING_TYPE) {
+        isReviewTurn = true;
+        if ("details" in message && typeof message.details === "object" && message.details !== null && "correctionId" in message.details) {
+          const candidate = message.details.correctionId;
+          if (typeof candidate === "string") correctionId = candidate;
+        }
+        continue;
       }
-      continue;
+      if (message.customType === RV_PLAN_TYPE) {
+        isReviewTurn = true;
+        if ("details" in message && typeof message.details === "object" && message.details !== null && "planId" in message.details) {
+          const candidate = message.details.planId;
+          if (typeof candidate === "string") planId = candidate;
+        }
+        continue;
+      }
     }
     if (message.role === "assistant" && "content" in message) {
       const text = messageText(message.content).trim();
@@ -182,7 +214,7 @@ export function analyzeTurn(messages: readonly unknown[]): TurnAnalysis {
     }
   }
   const substantive = (proposal !== undefined && proposal.length >= MIN_SUBSTANTIVE_CHARS) || filesChanged;
-  return { substantive, proposal, userText, filesChanged, researchToolsUsed, ensembleOutput, isReviewTurn, correctionId };
+  return { substantive, proposal, userText, filesChanged, researchToolsUsed, ensembleOutput, isReviewTurn, correctionId, planId };
 }
 
 export interface ActivationDecision {
@@ -248,7 +280,8 @@ function formatFindingsForCorrection(findings: readonly Finding[]): string {
     .join("\n");
 }
 
-export function buildCorrectionMessage(verdict: CouncilVerdict): string {
+/** Plan-gate gate: the ONLY autonomous turn after concern/fail asks for a plan. */
+export function buildPlanMessage(verdict: CouncilVerdict): string {
   return [
     `Resolve Vector review of your previous answer returned ${verdict.status.toUpperCase()}.`,
     verdict.summary,
@@ -256,8 +289,62 @@ export function buildCorrectionMessage(verdict: CouncilVerdict): string {
     "Findings to address:",
     formatFindingsForCorrection(verdict.findings),
     "",
-    "Revise your answer to resolve every finding above, or explicitly rebut one with concrete evidence. Do not repeat a flagged claim unchanged.",
+    "Produce a remediation PLAN ONLY for this turn. Hard rules:",
+    "- Do NOT edit files, write files, or run mutating tools (edit/write/bash are forbidden this turn).",
+    "- Do NOT implement anything. No code changes, no commands with side effects.",
+    "- Output a concise numbered plan: what to change, where, and why — addressing every finding above, or rebutting one with concrete evidence.",
+    "The user reviews your plan next. Execution happens only after their explicit go-ahead.",
   ].join("\n");
+}
+
+/** User-authorized execution turn (/rv proceed, /rv revise, or steering text). */
+export function buildExecutionMessage(
+  gate: { verdict: CouncilVerdict; plan?: string },
+  instructions?: string,
+): string {
+  const lines = [
+    `Resolve Vector review of your previous answer returned ${gate.verdict.status.toUpperCase()}.`,
+    gate.verdict.summary,
+    "",
+    "Findings to resolve:",
+    formatFindingsForCorrection(gate.verdict.findings),
+  ];
+  if (gate.plan) {
+    lines.push("", "The remediation plan you proposed:", gate.plan);
+  }
+  if (instructions && instructions.trim().length > 0) {
+    lines.push("", `User steering instructions: ${instructions.trim()}`);
+  }
+  lines.push(
+    "",
+    "The user has authorized execution. Implement the plan now — resolve every finding or rebut one with concrete evidence. Do not repeat a flagged claim unchanged.",
+  );
+  return lines.join("\n");
+}
+
+/** Hidden context attached to an ordinary user turn while the gate is open. */
+export function buildSteeringContext(gate: { verdict: CouncilVerdict; plan?: string }): string {
+  const lines = [
+    "[Resolve Vector — review gate context; not part of the user's message]",
+    `The previous answer was reviewed: ${gate.verdict.status.toUpperCase()} — ${gate.verdict.summary}`,
+    "Findings:",
+    formatFindingsForCorrection(gate.verdict.findings),
+  ];
+  if (gate.plan) {
+    lines.push("", "Pending remediation plan:", gate.plan);
+  }
+  lines.push(
+    "",
+    "Treat the user's message as steering for how to proceed with these findings and this plan. If the user is directing the fix, implement it accordingly; resolve every finding or rebut one with concrete evidence.",
+  );
+  return lines.join("\n");
+}
+
+/** Short roster labels for the `RV · review started` line (Qwen + Kimi style). */
+export function shortReviewerLabel(family: string, id: string): string {
+  const head = family.split("-")[0]?.trim();
+  if (head && head.length > 0) return head[0].toUpperCase() + head.slice(1);
+  return id;
 }
 
 export class ActivationController {
@@ -305,11 +392,33 @@ export class ActivationController {
     this.state.reviewTurnIds = [];
     this.state.pendingCorrectionId = undefined;
     this.state.pendingTurn = undefined;
+    this.state.pendingPlan = undefined;
+    this.state.awaitingUser = undefined;
   }
 
   private async handle(messages: readonly unknown[], ctx: ExtensionContext): Promise<void> {
     const config = this.runtime.config;
     const turn = analyzeTurn(messages);
+
+    // Plan turn completed → open the user gate. Never reviewed, never
+    // auto-activated: the plan is RV's own request, displayed as normal output.
+    if (turn.planId !== undefined && turn.planId === this.state.pendingPlan?.planId) {
+      const pending = this.state.pendingPlan;
+      this.state.pendingPlan = undefined;
+      this.state.awaitingUser = {
+        verdict: pending.verdict,
+        correctionId: pending.correctionId,
+        round: this.state.revisionRound,
+        plan: turn.proposal,
+      };
+      this.state.pendingCorrectionId = pending.correctionId;
+      this.deps.notify(
+        ctx,
+        "RV · awaiting your decision — /rv proceed · /rv revise <instructions> · /rv dismiss · /rv details",
+        "warning",
+      );
+      return;
+    }
 
     // Only the turn carrying OUR correction id is a revision. An unrelated
     // user turn while a correction is pending stays a normal turn.
@@ -317,6 +426,12 @@ export class ActivationController {
       turn.correctionId !== undefined && turn.correctionId === this.state.pendingCorrectionId;
     if (isCorrelatedRevision) {
       this.state.pendingCorrectionId = undefined;
+      this.state.awaitingUser = undefined;
+      if (!turn.substantive) {
+        // Steering consumed the gate but produced nothing reviewable.
+        this.deps.notify(ctx, "RV · review gate closed — nothing substantive to review", "info");
+        return;
+      }
       if (this.state.reviewing) {
         this.state.pendingTurn = { reason: "revision" };
         return;
@@ -324,6 +439,10 @@ export class ActivationController {
       await this.reviewCurrentAnswer(ctx, "revision");
       return;
     }
+
+    // While the gate is open, unrelated agent_end events (background tasks,
+    // stray completions) must not auto-review or disturb the gate.
+    if (this.state.awaitingUser !== undefined) return;
 
     const decision = shouldActivate(config, turn, this.deps.rng ?? Math.random);
     if (!decision.activate) return;
@@ -354,7 +473,16 @@ export class ActivationController {
       for (;;) {
         const { goal, proposal } = this.deps.lastExchange(ctx);
         if (!proposal || proposal.trim().length === 0) return;
-        this.deps.notify(ctx, `RV · provisional — reviewing previous answer…`, "info");
+        const roster = this.runtime.config.reviewers
+          .filter((r) => r.enabled)
+          .map((r) => shortReviewerLabel(r.family, r.id));
+        this.deps.notify(
+          ctx,
+          roster.length > 0
+            ? `RV · review started — ${roster.join(" + ")}`
+            : "RV · review started (no reviewers configured)",
+          "info",
+        );
         const verdict = await this.runtime.runReview(
           ctx,
           {
@@ -388,13 +516,13 @@ export class ActivationController {
         }
         this.actOnVerdict(ctx, verdict);
 
-        // Drain the coalesced pending completion — unless a corrective
-        // revision now owns the next turn (the pending answer is superseded).
+        // Drain the coalesced pending completion — unless a plan-gate turn
+        // now owns the next turn (the pending answer is superseded).
         const pending = this.state.pendingTurn;
         this.state.pendingTurn = undefined;
         if (pending === undefined) return;
-        if (this.state.pendingCorrectionId !== undefined) {
-          this.deps.notify(ctx, "RV · queued completion superseded by corrective revision", "info");
+        if (this.state.pendingCorrectionId !== undefined || this.state.pendingPlan !== undefined) {
+          this.deps.notify(ctx, "RV · queued completion superseded by remediation plan gate", "info");
           return;
         }
         current = pending;
@@ -417,6 +545,7 @@ export class ActivationController {
       case "review_unavailable":
         this.state.revisionRound = 0;
         this.deps.notify(ctx, renderStatusLine(verdict), "warning");
+        this.deps.notify(ctx, renderUnavailableDetail(verdict), "warning");
         return;
       case "split": {
         // Terminal escalation, never a correction request: RV does not know
@@ -431,16 +560,20 @@ export class ActivationController {
       }
       default: {
         if (this.state.revisionRound < max) {
+          // Plan gate: verdict + findings visible FIRST, then ONE plan-only
+          // turn, then a hard stop until the user decides. No execution turn.
           this.state.revisionRound += 1;
           this.correctionCounter += 1;
           const correctionId = `rv-cor-${this.generation.toString(36)}-${this.correctionCounter.toString(36)}`;
-          this.state.pendingCorrectionId = correctionId;
-          this.deps.sendCorrection(buildCorrectionMessage(verdict), correctionId);
+          const planId = `${correctionId}-plan`;
+          this.state.pendingPlan = { planId, verdict, correctionId };
           this.deps.notify(
             ctx,
-            `${renderStatusLine(verdict)} — revision requested (round ${this.state.revisionRound}/${max})`,
+            `${renderStatusLine(verdict)} — remediation plan requested (round ${this.state.revisionRound}/${max})`,
             "warning",
           );
+          this.deps.notify(ctx, renderVerdict(verdict), "info");
+          this.deps.sendPlan(buildPlanMessage(verdict), planId, correctionId);
         } else {
           const rounds = this.state.revisionRound;
           this.state.revisionRound = 0;
@@ -451,6 +584,67 @@ export class ActivationController {
           );
         }
       }
+    }
+  }
+
+  // ── User gate (awaitingUser) facade ──────────────────────────────────────
+
+  /** before_agent_start hook: ordinary user text at the gate gets the
+   * findings + pending plan attached and consumes the gate as steering. */
+  onBeforeAgentStart(): BeforeAgentStartEventResult | void {
+    const gate = this.state.awaitingUser;
+    if (!gate) return;
+    return {
+      message: {
+        customType: RV_STEERING_TYPE,
+        content: [{ type: "text", text: buildSteeringContext(gate) }],
+        display: false,
+        details: { correctionId: gate.correctionId },
+      },
+    };
+  }
+
+  /** /rv proceed: execute the pending plan (user-authorized). */
+  proceedWithPlan(ctx: ExtensionContext, instructions?: string): void {
+    const gate = this.state.awaitingUser;
+    if (!gate) {
+      this.deps.notify(ctx, "RV · no pending review decision — nothing to proceed with", "info");
+      return;
+    }
+    this.state.awaitingUser = undefined;
+    this.state.pendingCorrectionId = gate.correctionId;
+    this.deps.sendCorrection(buildExecutionMessage(gate, instructions), gate.correctionId);
+    this.deps.notify(
+      ctx,
+      instructions && instructions.trim().length > 0
+        ? "RV · executing the remediation plan with your instructions…"
+        : "RV · executing the remediation plan…",
+      "info",
+    );
+  }
+
+  /** /rv dismiss: close the gate without any turn. */
+  dismissGate(ctx: ExtensionContext): void {
+    if (!this.state.awaitingUser) {
+      this.deps.notify(ctx, "RV · no pending review decision to dismiss", "info");
+      return;
+    }
+    this.state.awaitingUser = undefined;
+    this.state.pendingCorrectionId = undefined;
+    this.state.revisionRound = 0;
+    this.deps.notify(ctx, "RV · review dismissed — findings noted, no changes applied", "info");
+  }
+
+  /** /rv details: reprint the verdict and the pending plan. */
+  gateDetails(ctx: ExtensionContext): void {
+    const gate = this.state.awaitingUser;
+    if (!gate) {
+      this.deps.notify(ctx, "RV · no pending review decision — /rv details is only live at the plan gate", "info");
+      return;
+    }
+    this.deps.notify(ctx, renderVerdict(gate.verdict), "info");
+    if (gate.plan) {
+      this.deps.notify(ctx, `Remediation plan (proposed, awaiting your decision):\n${gate.plan}`, "info");
     }
   }
 }

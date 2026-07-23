@@ -572,3 +572,39 @@ test("council passes separate generation deadlines per seat locality", async () 
   assert.deepEqual(seen.get("local-qwen"), { connectMs: 5_000, firstTokenMs: 10_000, totalMs: 90_000 });
   assert.deepEqual(seen.get("kimi"), { connectMs: 5_000, firstTokenMs: 30_000, totalMs: 90_000 });
 });
+
+test("truncation preserves the review goal and evidence verbatim — only oversized fields are cut", async () => {
+  // Finding: bounding must be field-aware, not a blind size chop. A 1KB goal
+  // inside a 500KB payload must survive intact; only the oversized proposal
+  // and excess evidence are cut, with markers exactly where content was dropped.
+  const prompts: string[] = [];
+  const deps: CouncilDeps = {
+    resolveReviewer: async (config) => okResolution(config),
+    complete: async (_resolved, _system, prompt) => {
+      prompts.push(prompt);
+      return { text: passJson() };
+    },
+  };
+  const goal = "REVIEW-GOAL: " + "verify the port keeps the overflow guard. ".repeat(25); // ~1KB
+  const proposal = "P".repeat(499_000); // the oversized payload
+  const evidence = Array.from({ length: 30 }, (_, i) => ({ kind: "file" as const, ref: `src/evidence-${i}.ts`, detail: "why it matters" }));
+  const verdict = await runCouncil({
+    goal,
+    proposal,
+    evidence,
+    config: configWith([reviewerA]),
+    deps,
+  });
+  assert.equal(prompts.length, 1);
+  const prompt = prompts[0];
+  assert.ok(prompt.length <= 90_000, `prompt ${prompt.length} chars exceeds cap + slack`);
+  assert.ok(prompt.includes(goal), "the full review goal survives verbatim");
+  assert.ok(prompt.includes("src/evidence-0.ts") && prompt.includes("src/evidence-19.ts"), "kept evidence items are intact");
+  assert.ok(!prompt.includes("src/evidence-29.ts"), "excess evidence is dropped, not partially leaked");
+  assert.match(prompt, /\[RV: \d+ further evidence items omitted to bound review context\]/);
+  assert.match(prompt, /\[RV: truncated — \d+ chars omitted to bound review context\]/);
+  // Markers attach to the proposal section, never to the goal section.
+  const goalSection = prompt.slice(prompt.indexOf("## Goal under review"), prompt.indexOf("## Completed answer"));
+  assert.doesNotMatch(goalSection, /\[RV:/, "no truncation marker may touch the goal");
+  assert.equal(verdict.reviewers[0].inputTruncated, true);
+});
