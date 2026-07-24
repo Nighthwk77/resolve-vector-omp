@@ -16,6 +16,7 @@ import { renderStatusLine, renderVerdict } from "./render.js";
 import type { RVEngine } from "./runtime.js";
 import { detailedGlmUsage, fetchGlmUsage } from "./provider-usage.js";
 import { runSetupWizard } from "./setup.js";
+import { dispatchWeb } from "./web/commands.js";
 
 /** Plan-gate facade the ActivationController implements for gate subcommands. */
 export interface ReviewFlowGate {
@@ -226,6 +227,8 @@ async function dispatch(runtime: RVEngine, args: string, ctx: ExtensionCommandCo
       return cmdReviewerRetry(runtime, ctx, rest[0] === "retry" ? rest[1] : undefined);
     case "setup":
       return runSetupWizard(runtime, ctx, ompVersion);
+    case "web":
+      return dispatchWeb(runtime, rest, ctx);
     case "review":
       return cmdReview(runtime, ctx);
     case "off":
@@ -294,9 +297,9 @@ export function registerRvCommand(pi: ExtensionAPI, runtime: RVEngine, gate?: Re
   // the package root would eagerly load omp's native addons in plain tests.
   const ompVersion: string = (pi.pi as { VERSION?: string } | undefined)?.VERSION ?? "unknown";
   pi.registerCommand("rv", {
-    description: "Resolve Vector — cross-model review (setup | status [probe] | usage | doctor [probe] | review | reviewer retry <id> | proceed | revise <i> | dismiss | details | on [mode] | off | config)",
+    description: "Resolve Vector — cross-model review (setup | web | status [probe] | usage | doctor [probe] | review | reviewer retry <id> | proceed | revise <i> | dismiss | details | on [mode] | off | config)",
     getArgumentCompletions: (prefix) => {
-      const subs = ["setup", "status", "usage", "doctor", "review", "reviewer", "proceed", "revise", "dismiss", "details", "on", "off", "config", "best", "fuse", "compare"];
+      const subs = ["setup", "web", "status", "usage", "doctor", "review", "reviewer", "proceed", "revise", "dismiss", "details", "on", "off", "config", "best", "fuse", "compare"];
       return subs.filter((s) => s.startsWith(prefix)).map((s) => ({ label: s, value: s }));
     },
     handler: (args, ctx) => dispatch(runtime, args, ctx, ompVersion, gate),

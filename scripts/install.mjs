@@ -2,8 +2,8 @@
 /**
  * Resolve Vector preview installer.
  *
- *   node scripts/install.mjs install   [--agent-dir <dir>]
- *   node scripts/install.mjs update    [--agent-dir <dir>]
+ *   node scripts/install.mjs install   [--agent-dir <dir>] [--with-web]
+ *   node scripts/install.mjs update    [--agent-dir <dir>] [--with-web]
  *   node scripts/install.mjs uninstall [--agent-dir <dir>]
  *   node scripts/install.mjs rollback  [--agent-dir <dir>]
  *
@@ -18,6 +18,11 @@
  * After install/update, `npm install --omit=dev` runs inside the installed
  * package so its runtime deps (pi-ai + native addons) resolve from the
  * extension's own node_modules, per omp's extension loader.
+ *
+ * Web reviewers (optional, opt-in): pass --with-web to also install the
+ * Playwright chromium browser for browser-based council seats. Without it,
+ * web features are inert until `/rv web setup` is run — it installs the
+ * browser on demand.
  */
 import { cp, mkdir, readdir, rename, rm, stat, copyFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -28,6 +33,7 @@ import { spawnSync } from "node:child_process";
 const action = process.argv[2];
 const agentDirFlag = process.argv.indexOf("--agent-dir");
 const agentDir = agentDirFlag > 0 ? resolve(process.argv[agentDirFlag + 1]) : join(homedir(), ".omp", "agent");
+const withWeb = process.argv.includes("--with-web");
 const sourceDir = resolve(new URL("..", import.meta.url).pathname);
 const targetDir = join(agentDir, "extensions", "resolve-vector-omp");
 const backupDir = join(agentDir, "extension-backups");
@@ -86,6 +92,7 @@ async function installDeps() {
   });
   if (result.status !== 0) die("npm install --omit=dev failed inside the installed package");
   await installNatives();
+  if (withWeb) await installWebBrowser();
 }
 
 /**
@@ -131,6 +138,24 @@ async function installNatives() {
     die(`${nativesPkg} unpacked but no ${nativePrefix}*.node binary is present`);
   }
   console.log(`native addon installed: ${nativesPkg}`);
+}
+
+/**
+ * Optional web reviewers need a chromium browser. Fail-soft: warn and
+ * continue if the download is unavailable — web features just stay inert
+ * until `/rv web setup` retries the install later.
+ */
+async function installWebBrowser() {
+  console.log("installing Playwright chromium for web reviewers (optional)…");
+  const result = spawnSync("npx", ["playwright", "install", "chromium"], {
+    cwd: targetDir,
+    stdio: "inherit",
+  });
+  if (result.status !== 0) {
+    console.warn("rv-install: chromium install failed — web reviewers stay inert until `/rv web setup` installs the browser on demand.");
+    return;
+  }
+  console.log("chromium installed — run `/rv web setup` inside omp to configure website reviewers.");
 }
 
 async function installOrUpdate(isUpdate) {
@@ -189,5 +214,5 @@ switch (action) {
     await rollback();
     break;
   default:
-    die("usage: node scripts/install.mjs install|update|uninstall|rollback [--agent-dir <dir>]");
+    die("usage: node scripts/install.mjs install|update|uninstall|rollback [--agent-dir <dir>] [--with-web]");
 }

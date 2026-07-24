@@ -39,6 +39,9 @@
   "dependencies": {
     "@oh-my-pi/pi-ai": "^17.0.7"
   },
+  "optionalDependencies": {
+    "playwright": "^1.52.0"
+  },
   "scripts": {
     "check": "tsc --noEmit",
     "test": "bun test",

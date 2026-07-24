@@ -59,6 +59,15 @@ export interface ReviewerReceipt {
   model: string;
   family: string;
   local: boolean;
+  /** Transport provenance: omp API call or browser-driven website consultation. */
+  transport?: "omp_api" | "interactive_web";
+  /** Interactive-web diagnostics. Never contains page content beyond the verdict. */
+  web?: {
+    sessionState?: "ready_authenticated" | "ready_anonymous" | "login_required" | "blocked" | "broken";
+    popupClicks?: number;
+    retries?: number;
+    webFailureCategory?: string;
+  };
   status: ReviewerStatus;
   /** Provider calls made: 1 normally, 2 when the repair retry fired. Budget accounting uses this. */
   calls?: number;

@@ -156,8 +156,44 @@ If the new build misbehaves:
 npm run rollback-preview
 ```
 
+
 To remove the addon while preserving your config and receipts:
 
 ```bash
 npm run uninstall-preview
 ```
+
+## 9. Optional: website-based reviewers
+
+In addition to API-backed reviewers, RV can add a reviewer seat for a
+provider's **website** — driven through a real Chromium session that reuses
+your existing login or free access. This covers providers with no API tier
+and is **off by default**.
+
+Because aggressive automation has caused provider account suspensions
+before, this path is manual-first and conservative: every consultation
+inspects the page state first, never types into login or auth fields, runs
+popup sweeps at five points, and never retries blocked/CAPTCHA/usage-limit
+pages. The browser stays headless except for the one-time `login` step.
+
+If you skipped the `--with-web` flag at install time, install the browser now:
+
+```bash
+node scripts/install.mjs install --with-web
+```
+
+Then inside OMP:
+
+```text
+/rv web setup
+/rv web login kimi
+/rv web test kimi
+/rv web on
+```
+
+`/rv web setup` adds `web:<provider>` seats to your roster (default scope
+`external-redacted`). `/rv web status` shows the live detected state for
+each provider on your machine. Web seats feed the same verdict parser,
+repair loop, and council merge as API reviewers — there is no second engine.
+
+See the README's "Web-based reviewers" section for the full safety contract.

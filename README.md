@@ -38,6 +38,16 @@ npm install
 npm run install-preview
 ```
 
+For the optional website-based reviewers (Chromium-driven), add `--with-web`:
+
+```bash
+node scripts/install.mjs install --with-web
+```
+
+This installs the Playwright Chromium browser (~150 MB). Without it, web
+reviewers stay inert until `/rv web setup` installs the browser on demand.
+```
+
 Restart OMP, then run:
 
 ```text
@@ -131,6 +141,11 @@ the current session with `/rv on auto`, `/rv on always`, or `/rv off`.
 | `/rv on [auto\|always\|sample]` | Enable automatic review for this session |
 | `/rv off` | Disable automatic review for this session |
 | `/rv config` | Show configuration and receipt locations |
+| `/rv web setup` | Add website-based reviewers that drive a real Chromium session on a provider's site through your existing login |
+| `/rv web status` | Show the bridge process, opt-in state, per-provider cooldown, and detected page state for each configured web reviewer |
+| `/rv web login <provider>` | Open the provider's site in a visible browser window so you can sign in once; the session persists in an RV-only profile |
+| `/rv web test <provider>` | Run exactly one consultation (`Reply with exactly: RV-OK`) to verify the bridge works, after inspecting page state |
+| `/rv web on` / `/rv web off` | Opt web consultations into/out of the reviewer council (off by default) |
 
 The model-callable `council_audit` tool uses the same review engine.
 
@@ -147,6 +162,58 @@ Each reviewer has an explicit scope:
 External calls are limited by hourly and daily budgets. Reservations are atomic
 across OMP processes, and failed calls and repair retries still count. `/rv
 status` tells you exactly which endpoint receives what.
+
+## Web-based reviewers (optional, opt-in)
+
+Besides API-backed reviewers, RV can add a reviewer seat for a provider's
+**website** itself — driven through a real Chromium session that reuses your
+existing login or free access. This covers providers with no API tier.
+
+**Safety by design.** Prior automation experiments got accounts suspended, so
+this feature is manual-first and conservative:
+
+- **Off by default.** No web consultation happens unless you run `/rv web on`.
+- **Inspect before acting.** Every consultation first detects the page state:
+  `ready_authenticated`, `ready_anonymous`, `login_required`, `blocked`, or
+  `broken`. A stray "Sign in" header link on a usable page is **not** a login
+  wall — RV proceeds. A login wall short-circuits with no typing.
+- **Never types into auth fields** (login, email, password, verification, OTP).
+  The Consultation prompt only ever goes into a recognized chat input.
+- **Popup sweeps** run at five points (post-navigation, pre-input-locate,
+  pre-submit, periodically while waiting, and before declaring a stall). A
+  conservative allowlist is the only set of buttons ever clicked; CAPTCHA,
+  verification, paywall, and quota controls are **never** dismissed.
+- **No retries of blocked states** — CAPTCHA, verification, rate-limit, and
+  login pages are reported once and never retried. Only transient transport
+  timeouts retry, at most once.
+- **Concurrency 1** across all web consultations (one browser profile), with a
+  per-provider cooldown (default 60 s) to avoid hammering a site.
+- **Headless by default.** The only flow that ever focuses the browser window
+  is `/rv web login <provider>`, so you can complete a sign-in once; the
+  session persists in an RV-only profile (`~/.omp/agent/rv-web-profile`).
+- **No secrets in responses.** Receipts record `transport: "interactive_web"`
+  plus a failure category, session state, popup-click count, and retry count —
+  never cookies, tokens, or page HTML.
+
+Web reviewers feed the **same** verdict parser, repair loop, council merge, and
+cross-family checks as API reviewers — there is no second review engine. They
+sit at `local: false` with the default `external-redacted` scope, so the budget
+ledger, redaction, and fail-closed machinery apply unchanged. A web seat is a
+`web:<provider>` provider (e.g. `web:deepseek`) and bypasses the model
+registry/API-key path entirely.
+
+**One-time setup:**
+
+```text
+/rv web setup      # pick providers and add seats to the config
+/rv web login kimi  # sign in once (opens a visible window)
+/rv web test kimi   # verify one consultation returns RV-OK
+/rv web on          # opt web reviewers into the council
+```
+
+Supported providers: deepseek, chatgpt, gemini, perplexity, claude, kimi, glm.
+Live-tested status varies by site; run `/rv web status` to see the detected
+state for each on your machine.
 
 ## Ensembles
 
@@ -200,6 +267,13 @@ The installer never overwrites a configured reviewer roster.
 - Escalation-trigger reviewer seats are parsed but remain inactive.
 - `auto` mode is heuristic and will sometimes over- or under-fire.
 - `/rv on` changes are session-scoped; edit the JSON config to persist a mode.
+- Web-based reviewers are new and opt-in: site selectors can drift as
+  providers update their UIs, and a provider may change or revoke access at
+  any time. Run `/rv web status` and `/rv web test <provider>` to verify a
+  site is still usable on your machine before relying on it. Aggressive
+  auto-consults caused a provider suspension in a prior experiment — keep web
+  reviewers off unless you need them, and never bypass a CAPTCHA, login wall,
+  or usage limit.
 
 ## Development
 

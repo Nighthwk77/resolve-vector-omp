@@ -52,6 +52,7 @@ function makeHarness(
       configPath: join(dir, "resolve-vector.json"),
       receiptsPath: join(dir, "r.jsonl"),
       ledgerPath: join(dir, "b.jsonl"),
+      agentDir: dir,
     },
     config,
     configErrors: [],
@@ -68,6 +69,7 @@ function makeHarness(
       runtime.configCreated = false;
       return Promise.resolve();
     },
+    web: { bridge: {} } as unknown as RVEngine["web"],
   };
   const ui = {
     select: (_title: string, items: (string | { label: string })[]) => {

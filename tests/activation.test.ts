@@ -104,7 +104,7 @@ function makeHarness(mode: ResolveVectorConfig["mode"], overrides: Partial<Resol
   let proposal = "the completed answer under review, long enough to matter";
   let leaf = "leaf-1";
   const engine: RVEngine = {
-    paths: { configPath: "/tmp/c", receiptsPath: "/tmp/r", ledgerPath: "/tmp/l" },
+    paths: { configPath: "/tmp/c", receiptsPath: "/tmp/r", ledgerPath: "/tmp/l", agentDir: "/tmp" },
     config,
     configErrors: [],
     configCreated: false,
@@ -121,6 +121,7 @@ function makeHarness(mode: ResolveVectorConfig["mode"], overrides: Partial<Resol
     runEnsemble: () => Promise.reject(new Error("not under test")),
     recentReceipts: () => Promise.resolve([]),
     reload: () => Promise.resolve(),
+    web: { bridge: {} } as unknown as RVEngine["web"],
   };
   const deps: ActivationDeps = {
     notify: (_ctx, message) => notifications.push(message),

@@ -15,7 +15,8 @@ import { CircuitBreakerRegistry } from "./circuit-breaker.js";
 import type { CouncilDeps, CouncilProgressEvent } from "./council.js";
 import { runCouncil, runEnsemble } from "./council.js";
 import { FileBudgetLedger, loadConfig, type ActivationMode, type BudgetCoordinator, type ResolveVectorConfig } from "./policy.js";
-import { resolveReviewer, runReviewerCompletion } from "./providers.js";
+import { isWebSeat, resolveReviewer, runReviewerCompletion } from "./providers.js";
+import { WebTransport } from "./web/transport.js";
 import {
   appendReceipt,
   externalCallUnits,
@@ -29,6 +30,8 @@ export interface RuntimePaths {
   configPath: string;
   receiptsPath: string;
   ledgerPath: string;
+  /** Agent dir for bridge state/profile files. */
+  agentDir: string;
 }
 
 export function defaultPaths(agentDir: string): RuntimePaths {
@@ -38,6 +41,7 @@ export function defaultPaths(agentDir: string): RuntimePaths {
     configPath: process.env.RV_CONFIG_PATH ?? join(agentDir, "resolve-vector.json"),
     receiptsPath: join(agentDir, "resolve-vector.receipts.jsonl"),
     ledgerPath: join(agentDir, "resolve-vector.budget.jsonl"),
+    agentDir,
   };
 }
 
@@ -76,6 +80,8 @@ export interface RVEngine {
   readonly circuits: CircuitBreakerRegistry;
   /** Transport seam (headless pi-ai by default); used by council and health probes. */
   readonly complete: CouncilDeps["complete"];
+  /** Web-advisor transport (bridge lifecycle + consultations). */
+  readonly web: WebTransport;
   configErrors: string[];
   configCreated: boolean;
   setMode(mode: ActivationMode): void;
@@ -97,6 +103,8 @@ export class RVRuntime implements RVEngine {
   private budget: BudgetCoordinator;
   readonly complete: CouncilDeps["complete"];
   readonly circuits: CircuitBreakerRegistry;
+  /** Web-advisor transport (bridge lifecycle + consultations). */
+  readonly web: WebTransport;
 
   private constructor(
     public readonly paths: RuntimePaths,
@@ -105,10 +113,13 @@ export class RVRuntime implements RVEngine {
     public configCreated: boolean,
     options: RuntimeOptions = {},
   ) {
+    this.web = new WebTransport(paths.agentDir, new URL("./web/bridge-entry.mjs", import.meta.url).pathname, () => this.config);
     this.complete =
       options.complete ??
       ((resolved, systemPrompt, userPrompt, callOptions) =>
-        runReviewerCompletion(resolved, systemPrompt, userPrompt, callOptions));
+        isWebSeat(resolved.config)
+          ? this.web.complete(resolved, systemPrompt, userPrompt, callOptions)
+          : runReviewerCompletion(resolved, systemPrompt, userPrompt, callOptions));
     this.circuits = new CircuitBreakerRegistry({ cooldownMs: config.circuitBreakerCooldownMs });
     this.budget =
       options.budget ??

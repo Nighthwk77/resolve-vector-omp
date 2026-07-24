@@ -88,9 +88,22 @@ export function mergeStatuses(statuses: readonly VerdictStatus[]): VerdictStatus
   return worst;
 }
 
-function skippedReceipt(config: ReviewerConfig, status: ReviewerReceipt["status"], detail: string): ReviewerReceipt {
+/** Map transport-level web diagnostics onto the receipt shape. */
+function toReceiptWeb(
+  web: { sessionState?: "ready_authenticated" | "ready_anonymous" | "login_required" | "blocked" | "broken"; popupClicks?: number; retries?: number; failureCategory?: string } | undefined,
+  category?: string,
+): ReviewerReceipt["web"] {
+  if (!web) return undefined;
   return {
-    reviewerId: config.id,
+    sessionState: web.sessionState,
+    popupClicks: web.popupClicks,
+    retries: web.retries,
+    webFailureCategory: category ?? web.failureCategory,
+  };
+}
+
+function skippedReceipt(config: ReviewerConfig, status: ReviewerReceipt["status"], detail: string): ReviewerReceipt {
+  return {    reviewerId: config.id,
     provider: config.provider,
     model: config.model,
     family: config.family,
@@ -117,6 +130,7 @@ async function reviewWith(
     model: resolved.model.id,
     family: resolved.family,
     local: resolved.config.local,
+    transport: (resolved.config.provider.startsWith("web:") ? "interactive_web" : "omp_api") as "interactive_web" | "omp_api",
   };
   // Bound the review context: only the goal, answer, evidence, and
   // constraints go out — never the whole OMP conversation — and oversized
@@ -171,6 +185,7 @@ async function reviewWith(
         firstTokenLatencyMs: output.metrics?.firstTokenLatencyMs,
         inputTruncated: bounded.truncated || undefined,
         usage: output.usage,
+        web: output.web ? toReceiptWeb(output.web) : undefined,
       };
     } catch (parseError) {
       // One repair retry (proven in the legacy panel-review experiment): resend
@@ -258,12 +273,16 @@ async function reviewWith(
     }
     const message = (error as Error).message;
     const isTimeout = /timed?\s*out|timeout|aborted/i.test(message) || (error as Error).name === "TimeoutError";
+    // WebConsultError carries consultation diagnostics for the receipt.
+    const webError = error as { web?: ReviewerReceipt["web"]; category?: string };
     return {
       ...base,
       status: isTimeout ? "timeout" : "error",
       calls,
       findings: [],
       latencyMs,
+      failureCategory: webError.category,
+      web: toReceiptWeb(webError.web, webError.category),
       inputTruncated: bounded.truncated || undefined,
       error: message,
     };

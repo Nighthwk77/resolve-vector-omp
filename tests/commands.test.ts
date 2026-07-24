@@ -25,7 +25,7 @@ function fakeCtx(notifications: Notify[]): ExtensionCommandContext {
 function fakeEngine(): RVEngine {
   const engine = {
     config: { ...DEFAULT_CONFIG, reviewers: [] } as ResolveVectorConfig,
-    paths: { configPath: "/tmp/rv-fake/config.json", receiptsPath: "/tmp/rv-fake/r.jsonl", ledgerPath: "/tmp/rv-fake/b.jsonl" },
+    paths: { configPath: "/tmp/rv-fake/config.json", receiptsPath: "/tmp/rv-fake/r.jsonl", ledgerPath: "/tmp/rv-fake/b.jsonl", agentDir: "/tmp/rv-fake" },
     configErrors: [],
     configCreated: true,
     circuits: new CircuitBreakerRegistry({ cooldownMs: 300_000 }),
@@ -37,6 +37,7 @@ function fakeEngine(): RVEngine {
     runEnsemble: () => Promise.reject(new Error("not under test")),
     recentReceipts: () => Promise.resolve([]),
     reload: () => Promise.resolve(),
+    web: { bridge: {} } as unknown as RVEngine["web"],
   };
   return engine;
 }

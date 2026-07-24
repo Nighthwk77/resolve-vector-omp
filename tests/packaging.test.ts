@@ -36,6 +36,14 @@ test("packaged artifact: contents and install/update/rollback/uninstall cycle", 
     "package/LICENSE",
     "package/README.md",
     "package/src/index.ts",
+    "package/src/web/adapters.mjs",
+    "package/src/web/bridge-core.mjs",
+    "package/src/web/bridge-entry.mjs",
+    "package/src/web/commands.ts",
+    "package/src/web/detect.mjs",
+    "package/src/web/manager.ts",
+    "package/src/web/popups.mjs",
+    "package/src/web/transport.ts",
     "package/hooks/completion-gate.ts",
     "package/resolve-vector.example.json",
     "package/examples/local-openai-compatible.json",
@@ -100,7 +108,7 @@ test("npm pack --dry-run includes distribution files", () => {
   // npm >=7 prints the Tarball Contents listing to stderr.
   const result = spawnSync("npm", ["pack", "--dry-run"], { cwd: REPO, encoding: "utf8" });
   const out = `${result.stdout}\n${result.stderr}`;
-  for (const entry of ["scripts/install.mjs", "LICENSE", "README.md", "resolve-vector.example.json", "src/index.ts"]) {
+  for (const entry of ["scripts/install.mjs", "LICENSE", "README.md", "resolve-vector.example.json", "src/index.ts", "src/web/bridge-core.mjs", "src/web/commands.ts"]) {
     assert.ok(out.includes(entry), `dry-run missing ${entry}`);
   }
 });

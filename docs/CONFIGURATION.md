@@ -32,6 +32,7 @@ Receipts and the budget ledger stay in the agent directory.
 | `maxReviewInputChars` | `80000` | Review prompt cap; oversized input is truncated with receipt metadata |
 | `maxReviewOutputTokens` | `4096` | Max output tokens per reviewer call (repair calls included) |
 | `reviewers` | `[]` | Reviewer seat definitions |
+| `webAdvisors` | `{ optIn: false, cooldownMs: 60000 }` | Optional website-based reviewers: `optIn` must be true to consult any `web:<provider>` seat (enable via `/rv web on`); `cooldownMs` is the per-provider throttle between same-site consultations |
 
 ## Generation health
 
@@ -78,18 +79,32 @@ deadline) that distinguishes `endpoint reachable` from `generation healthy`.
 | Field | Meaning |
 | --- | --- |
 | `id` | Stable human-readable seat identifier |
-| `provider` | Exact OMP provider ID |
-| `model` | Exact OMP model ID |
+| `provider` | Exact OMP provider ID, or `web:<app>` for a website-based seat (e.g. `web:deepseek`); `web:` seats use a Chromium session and bypass the model registry |
+| `model` | Exact OMP model ID (ignored for `web:` seats beyond display) |
 | `family` | Model family used for diversity enforcement |
 | `role` | `critic`, `verifier`, `method`, `judge`, or `fusion` |
-| `local` | Whether the endpoint runs on the local machine |
-| `scope` | `local-only`, `external-redacted`, or `external-allowed` |
+| `local` | Whether the endpoint runs on the local machine (`false` for all `web:` seats) |
+| `scope` | `local-only`, `external-redacted`, or `external-allowed` (default `external-redacted` for `web:` seats) |
 | `enabled` | Whether the seat may run |
 | `order` | Stable roster order |
 | `trigger` | `always`, `sample`, or reserved `escalation` |
 
 RV checks the live catalog family as well as the configured family. A reviewer
 matching the primary family is skipped.
+
+### Website-based seats (`web:<app>`)
+
+A `web:<app>` provider id marks a seat driven through the provider's website
+via a Chromium sidecar bridge instead of an API. There is no API key — the
+seat reuses your existing browser login or free access in an RV-only profile
+(`~/.omp/agent/rv-web-profile`). Web seats are always `local: false` and
+default to `external-redacted`, so the same budget ledger, redaction, and
+fail-closed rules apply as API seats. The supported `app` values are:
+`deepseek`, `chatgpt`, `gemini`, `perplexity`, `claude`, `kimi`, `glm` (see
+`/rv web setup`). Web consultations never happen unless `webAdvisors.optIn`
+is true. See the README's "Web-based reviewers" section for the safety
+contract (inspect-before-act, no retries of blocked states, concurrency 1,
+headless except the one-time login flow).
 
 ## External budgets
 
@@ -114,7 +129,10 @@ Verdicts are appended to:
 Receipts include activation reason, reviewer outcomes, findings, evidence,
 latency (connect, first-token, and total), failure category, circuit state,
 skip/degradation flags, reported token usage, revision relationship, and
-deterministic check results. Secrets are redacted before persistence.
+deterministic check results. Secrets are redacted before persistence. Web
+reviewer receipts additionally carry `transport: "interactive_web"` with a
+failure category, session state, popup-click count, and retry count — never
+cookies, tokens, or page HTML.
 
 ## Privacy scopes
 

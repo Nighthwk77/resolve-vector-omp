@@ -44,6 +44,14 @@ export function effectiveScope(reviewer: ReviewerConfig): ReviewerScope {
   return reviewer.scope ?? (reviewer.local ? "local-only" : "external-redacted");
 }
 
+export interface WebAdvisorsConfig {
+  /** Master opt-in. OFF by default: web automation has real account risk
+   * (old RV recorded a DeepSeek suspension from aggressive auto-consults). */
+  optIn: boolean;
+  /** Minimum ms between consultations per provider. */
+  cooldownMs: number;
+}
+
 export interface ResolveVectorConfig {
   mode: ActivationMode;
   defaultCouncilMode: CouncilMode;
@@ -70,6 +78,7 @@ export interface ResolveVectorConfig {
   /** Max output tokens per reviewer call (also bounds repair calls). */
   maxReviewOutputTokens: number;
   reviewers: ReviewerConfig[];
+  webAdvisors: WebAdvisorsConfig;
 }
 
 /** Resolve the three generation deadlines for one seat from config. */
@@ -100,6 +109,7 @@ export const DEFAULT_CONFIG: ResolveVectorConfig = {
   maxReviewInputChars: 80_000,
   maxReviewOutputTokens: 4096,
   reviewers: [],
+  webAdvisors: { optIn: false, cooldownMs: 60_000 },
 };
 
 const ACTIVATION_MODES: Record<ActivationMode, true> = { off: true, manual: true, auto: true, always: true, sample: true };
@@ -238,6 +248,24 @@ export function parseConfig(raw: unknown): { config: ResolveVectorConfig; errors
   };
   bool("runInBackground");
   bool("allowInteractiveWindows");
+
+  if (raw.webAdvisors !== undefined) {
+    if (!isRecord(raw.webAdvisors)) {
+      errors.push("webAdvisors: must be an object");
+    } else {
+      if (raw.webAdvisors.optIn !== undefined) {
+        if (typeof raw.webAdvisors.optIn === "boolean") config.webAdvisors.optIn = raw.webAdvisors.optIn;
+        else errors.push("webAdvisors.optIn: must be boolean");
+      }
+      if (raw.webAdvisors.cooldownMs !== undefined) {
+        if (typeof raw.webAdvisors.cooldownMs === "number" && raw.webAdvisors.cooldownMs >= 0) {
+          config.webAdvisors.cooldownMs = raw.webAdvisors.cooldownMs;
+        } else {
+          errors.push("webAdvisors.cooldownMs: must be a number >= 0");
+        }
+      }
+    }
+  }
 
   if (raw.reviewers !== undefined) {
     if (!Array.isArray(raw.reviewers)) {

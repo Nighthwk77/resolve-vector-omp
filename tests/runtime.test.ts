@@ -46,6 +46,7 @@ async function makePaths(): Promise<RuntimePaths> {
     configPath: join(dir, "config.json"),
     receiptsPath: join(dir, "receipts.jsonl"),
     ledgerPath: join(dir, "budget.jsonl"),
+    agentDir: dir,
   };
 }
 

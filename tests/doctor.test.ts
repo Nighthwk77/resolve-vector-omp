@@ -56,7 +56,7 @@ async function makeHarness(
   const config: ResolveVectorConfig = { ...DEFAULT_CONFIG, reviewers: [qwenReviewer], ...configOverrides };
   const circuits = new CircuitBreakerRegistry({ cooldownMs: 300_000 });
   const runtime: RVEngine = {
-    paths: { configPath: join(dir, "resolve-vector.json"), receiptsPath: join(dir, "r.jsonl"), ledgerPath: join(dir, "b.jsonl") },
+    paths: { configPath: join(dir, "resolve-vector.json"), receiptsPath: join(dir, "r.jsonl"), ledgerPath: join(dir, "b.jsonl"), agentDir: dir },
     config,
     circuits,
     complete,
@@ -67,6 +67,7 @@ async function makeHarness(
     runEnsemble: () => Promise.reject(new Error("not under test")),
     recentReceipts: () => Promise.resolve([]),
     reload: () => Promise.resolve(),
+    web: { bridge: {} } as unknown as RVEngine["web"],
   };
   const model = { provider: "vllm-mlx", id: "qwen3-coder", baseUrl, name: "qwen3-coder" };
   const ctx = {

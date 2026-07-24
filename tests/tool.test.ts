@@ -60,7 +60,7 @@ function makeTool(seats = 1): ToolHarness {
     });
   }
   const engine: RVEngine = {
-    paths: { configPath: "/tmp/rv-fake/config.json", receiptsPath: "/tmp/rv-fake/r.jsonl", ledgerPath: "/tmp/rv-fake/b.jsonl" },
+    paths: { configPath: "/tmp/rv-fake/config.json", receiptsPath: "/tmp/rv-fake/r.jsonl", ledgerPath: "/tmp/rv-fake/b.jsonl", agentDir: "/tmp/rv-fake" },
     config,
     configErrors: [],
     configCreated: false,
@@ -77,6 +77,7 @@ function makeTool(seats = 1): ToolHarness {
     },
     recentReceipts: () => Promise.resolve([]),
     reload: () => Promise.resolve(),
+    web: { bridge: {} } as unknown as RVEngine["web"],
   };
   let execute: Execute | undefined;
   // TypeBox shim double: the tool only calls these builders; contents are irrelevant here.

@@ -38,6 +38,13 @@ export interface ReviewerOutput {
   usage?: { input?: number; output?: number };
   /** Connect/first-token/total latencies for receipts and health reporting. */
   metrics?: CallMetrics;
+  /** Interactive-web consultation diagnostics (web seats only). */
+  web?: {
+    sessionState?: "ready_authenticated" | "ready_anonymous" | "login_required" | "blocked" | "broken";
+    popupClicks?: number;
+    retries?: number;
+    failureCategory?: string;
+  };
 }
 
 /** Per-call transport options. Deadlines/maxTokens come from council policy. */
@@ -53,8 +60,20 @@ export type ResolveResult =
   | { ok: true; reviewer: ResolvedReviewer }
   | { ok: false; error: ResolveError; detail: string };
 
+/** True when the seat is a browser-driven website reviewer. */
+export function isWebSeat(config: ReviewerConfig): boolean {
+  return config.provider.startsWith("web:");
+}
+
 /** Resolve a configured reviewer to an authenticated omp model. */
 export async function resolveReviewer(ctx: ExtensionContext, config: ReviewerConfig): Promise<ResolveResult> {
+  if (isWebSeat(config)) {
+    // Web seats bypass the model registry: no API key, no endpoint. Family
+    // comes from config (set by /rv web setup from the adapter table).
+    const app = config.provider.slice("web:".length);
+    const pseudoModel = { provider: config.provider, id: app, baseUrl: "" } as unknown as Model;
+    return { ok: true, reviewer: { config, model: pseudoModel, family: config.family } };
+  }
   const model = ctx.models.resolve(`${config.provider}/${config.model}`) ?? ctx.models.resolve(config.model);
   if (!model) {
     return { ok: false, error: "unknown_model", detail: `${config.provider}/${config.model} is not an authenticated model in this session` };
