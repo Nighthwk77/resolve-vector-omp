@@ -23,6 +23,7 @@
     "scripts",
     "examples",
     "docs/GETTING_STARTED.md",
+    "docs/PLANNER.md",
     "docs/CONFIGURATION.md",
     "README.md",
     "LICENSE",
@@ -37,7 +38,7 @@
     }
   },
   "dependencies": {
-    "@oh-my-pi/pi-ai": "^17.0.7"
+    "@oh-my-pi/pi-ai": "^17.1.6"
   },
   "optionalDependencies": {
     "playwright": "^1.52.0"
@@ -51,7 +52,7 @@
     "rollback-preview": "node scripts/install.mjs rollback"
   },
   "devDependencies": {
-    "@oh-my-pi/pi-coding-agent": "^17.0.7",
+    "@oh-my-pi/pi-coding-agent": "^17.1.6",
     "typescript": "^5.9.2"
   }
 }

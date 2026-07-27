@@ -7,7 +7,8 @@ cross-model review.
 
 You need:
 
-1. OMP 17.0.7 or newer.
+1. OMP 17.0.7 or newer (minimum API level). This release is validated against
+   OMP 17.1.6; use the current OMP release for a new installation.
 2. Node.js and npm.
 3. A primary model in OMP.
 4. A reviewer from a different family.
@@ -136,7 +137,42 @@ Session-only switches are also available:
 /rv off
 ```
 
-## 7. Add a second reviewer
+## 7. Enable pre-execution planning
+
+Completion checking and plan checking are separate controls. Start the planner
+in `ask` mode so RV checks OMP's approach before edits and always waits for
+your approval:
+
+```text
+/rv plan ask
+```
+
+Give OMP a consequential task such as an implementation, fix, refactor,
+configuration change, or deployment. OMP may inspect files, but RV blocks
+mutating tools until:
+
+1. OMP proposes a plan;
+2. the `plan_review` council checks it;
+3. OMP addresses any findings and RV checks the revised plan; and
+4. you run `/rv proceed` or give approval in ordinary language.
+
+Use `/rv revise <instructions>` or type guidance to change the plan, `/rv
+details` to see the plan and findings, and `/rv dismiss` to cancel without
+editing anything.
+
+After ask mode is proven in your setup, `/rv plan auto` may execute a passed
+low-risk plan without another prompt. It still stops on split or unavailable
+reviews, unresolved findings, destructive intent, configured external
+effects, and configured high-severity findings. These command changes last for
+the current OMP session; `/rv setup` persists your chosen plan mode.
+
+Plan-review seats and completion-review seats are selected independently in
+`/rv setup`. A seat can serve either workflow or both. The completion mode
+still independently decides whether RV reviews the finished implementation.
+
+See [Planner Workflow](PLANNER.md) for the exact behavior and limitations.
+
+## 8. Add a second reviewer
 
 Ensemble commands need at least two enabled reviewer seats. Add another reviewer
 entry with a different family, then try:
@@ -150,7 +186,7 @@ entry with a different family, then try:
 Reviewers are bounded by `maxConcurrentReviewers`, privacy scopes, and the same
 external budget ledger.
 
-## 8. Update safely
+## 9. Update safely
 
 ```bash
 cd resolve-vector-omp
@@ -172,7 +208,7 @@ To remove the addon while preserving your config and receipts:
 npm run uninstall-preview
 ```
 
-## 9. Optional: website-based reviewers
+## 10. Optional: website-based reviewers
 
 In addition to API-backed reviewers, RV can add a reviewer seat for a
 provider's **website** — driven through a real Chromium session that reuses

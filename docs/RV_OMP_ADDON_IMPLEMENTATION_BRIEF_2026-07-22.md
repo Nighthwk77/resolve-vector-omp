@@ -2,7 +2,13 @@
 
 **Date:** 2026-07-22  
 **Audience:** coding agent or engineer implementing the pivot  
-**Status:** approved direction; implement the smallest working vertical slice first
+**Status:** historical implementation contract; the vertical slice and later
+milestones have shipped
+
+> This file preserves the original build contract and therefore uses future
+> tense and contains superseded milestone language. It is not the current user
+> guide. Use `README.md`, `docs/GETTING_STARTED.md`, `docs/PLANNER.md`, and
+> `docs/CONFIGURATION.md` for the shipped commands and behavior.
 
 ## 1. Product definition
 

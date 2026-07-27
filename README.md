@@ -29,7 +29,9 @@ general reasoning. It is not limited to source ports.
 ## Install
 
 You need OMP 17.0.7 or newer, Node/npm, and at least two different model
-families available to OMP.
+families available to OMP. `17.0.7` is the minimum compatible API level, not
+the recommended installed version; this release is validated against OMP
+17.1.6.
 
 ```bash
 git clone https://github.com/Nighthwk77/resolve-vector-omp.git
@@ -152,8 +154,51 @@ the current session with `/rv on auto`, `/rv on always`, or `/rv off`.
 | `/rv plan off` | Disable pre-execution plan review |
 | `/rv plan status` | Show pre-execution planning mode, current state, and rethink rounds |
 | `/rv plan details` | Show the proposed plan, reviewer findings, and revised plan |
+| `/rv proceed` | Approve the plan currently waiting for your decision and start execution |
+| `/rv revise <instructions>` | Ask OMP to revise the waiting plan using your guidance |
+| `/rv details` | Reprint the active plan/remediation verdict and details |
+| `/rv dismiss` | Cancel the active plan or remediation gate without starting another turn |
 
 The model-callable `council_audit` tool uses the same review engine.
+
+## Pre-execution planner
+
+Completion review catches a bad result after the work. The optional planner
+checks the approach before OMP is allowed to edit files or change external
+state.
+
+Start conservatively:
+
+```text
+/rv plan ask
+```
+
+For a consequential task, the actual flow is:
+
+1. OMP may inspect the workspace, but produces a plan before mutating anything.
+2. Only reviewers assigned to `plan_review` critique that plan.
+3. On `concern` or `fail`, OMP receives the structured findings and writes a
+   complete revised plan. RV reviews that revision again, up to the configured
+   rethink limit.
+4. `ask` mode always pauses with a plain-language decision panel. `/rv
+   proceed` approves execution; typed guidance or `/rv revise <instructions>`
+   requests another plan; `/rv dismiss` cancels.
+5. `auto` mode starts execution only after a pass that clears RV's
+   deterministic destructive, external-effect, and high-severity escalation
+   checks. Split, unavailable, unresolved, or risky cases still stop for you.
+6. After execution, the separate completion activation policy (`manual`,
+   `auto`, `always`, `sample`, or `off`) decides whether the finished work is
+   reviewed.
+
+While a plan is being authored, reviewed, revised, or awaiting approval, RV's
+tool hook allows recognized read-only inspection and blocks edits, mutating
+shell commands, and unknown tools. This is an enforced barrier, not just a
+prompt request.
+
+Planner mode and completion-review mode are independent and `/rv plan ...`
+changes are session-scoped. The setup wizard configures and persists both.
+See **[Planner Workflow](docs/PLANNER.md)** for the exact state flow, activation
+rules, decision behavior, and current preview limits.
 
 ## Privacy and cost
 
@@ -278,6 +323,10 @@ The installer never overwrites a configured reviewer roster.
   hourly/daily limits.
 - **Need more detail:** see [Getting Started](docs/GETTING_STARTED.md) and
   [Configuration Reference](docs/CONFIGURATION.md).
+- **Planner did not activate:** confirm `/rv plan status` is `ask` or `auto`.
+  The default deterministic activation catches consequential change requests;
+  use `planning.activation: "always"` if you want every non-trivial user turn
+  to enter planning.
 
 ## Current preview limits
 

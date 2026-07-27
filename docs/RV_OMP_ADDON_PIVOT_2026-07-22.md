@@ -1,5 +1,11 @@
 # RV → free omp addon (pivot) — 2026-07-22
 
+> **Historical decision record.** The pivot described here is complete.
+> Architecture examples and proposed activation tiers below capture the
+> decision at that date and may be superseded. Current behavior is documented
+> in `README.md`, `docs/GETTING_STARTED.md`, `docs/PLANNER.md`, and
+> `docs/CONFIGURATION.md`.
+
 ## Decision
 Stop building RV as a standalone app competing with omp. **Pivot RV to a free
 omp addon: a cross-vendor "advisor council" / port-audit layer.** Keep the RV

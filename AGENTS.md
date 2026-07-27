@@ -16,7 +16,7 @@ Before planning or implementing substantial work, read:
 
 - Treat the installed OMP source and examples at
   `/Users/jgrayson/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent`
-  as authoritative for the OMP 17.0.7 extension API, lifecycle events,
+  as authoritative for the OMP 17.1.6 extension API, lifecycle events,
   commands, tools, UI, providers, and package discovery.
 - Inspect the legacy Resolve Vector repository at
   `/Users/jgrayson/Documents/ResolveVector` for reusable provider, orchestration,
@@ -40,9 +40,19 @@ Before planning or implementing substantial work, read:
 - Every material feature needs a focused test and evidence against the release
   gates in the implementation brief.
 
-## Immediate milestone
+## Current product state
 
-Complete the smallest end-to-end vertical slice first: `/rv review`, one local
-OpenAI-compatible reviewer, one remote API reviewer, a typed verdict, concise
-visible status, and a durable JSONL receipt. Then add automatic completion
-review and corrective turns with strict recursion guards.
+The vertical slice, automatic completion review, bounded remediation gate,
+ensembles, pre-execution plan review, setup wizard, and optional web advisors
+are implemented. Treat these as shipped behavior, not future milestones.
+
+Before changing user-facing behavior, keep these current guides synchronized:
+
+1. `README.md` — product overview, install, commands, and safety contract.
+2. `docs/GETTING_STARTED.md` — first-run path.
+3. `docs/PLANNER.md` — exact pre-execution planner workflow and limitations.
+4. `docs/CONFIGURATION.md` — accepted fields and their real runtime behavior.
+
+Files dated 2026-07-21 or 2026-07-22 are historical research/design records.
+They explain why RV was built but are not the current command or configuration
+reference.

@@ -33,7 +33,42 @@ Receipts and the budget ledger stay in the agent directory.
 | `maxReviewOutputTokens` | `4096` | Max output tokens per reviewer call (repair calls included) |
 | `reviewers` | `[]` | Reviewer seat definitions |
 | `webAdvisors` | `{ optIn: false, cooldownMs: 60000 }` | Optional website-based reviewers: `optIn` must be true to consult any `web:<provider>` seat (enable via `/rv web on`); `cooldownMs` is the per-provider throttle between same-site consultations |
-| `planning` | `{ mode: "off", ... }` | Pre-execution plan review settings (`mode`: `off` \| `ask` \| `auto`, `maxRethinkRounds`: `2`, `reviewRevisedPlan`: `true`) |
+| `planning` | `{ mode: "off", ... }` | Pre-execution plan review settings; see the table below |
+
+## Pre-execution planning
+
+```json
+{
+  "planning": {
+    "mode": "ask",
+    "activation": "auto",
+    "maxRethinkRounds": 2,
+    "reviewRevisedPlan": true,
+    "askOnSplit": true,
+    "askOnCritical": true,
+    "askOnExternalEffects": true
+  }
+}
+```
+
+| Field | Default | Actual behavior |
+| --- | ---: | --- |
+| `mode` | `"off"` | `off` disables the planner; `ask` always waits after review; `auto` may execute a passed low-risk plan |
+| `activation` | `"auto"` | `auto` intercepts deterministic consequential-change signals; `always` intercepts every non-greeting user turn; `manual` is accepted for compatibility but does not auto-activate, and this preview has no one-shot start command |
+| `maxRethinkRounds` | `2` | Maximum council-feedback → OMP-rethink rounds before RV stops for the user |
+| `reviewRevisedPlan` | `true` | Compatibility field. The current safety path always reviews a revised plan, even if this is set false |
+| `askOnSplit` | `true` | Compatibility field. A split always stops for the user; it is never auto-selected |
+| `askOnCritical` | `true` | In `auto` mode, a nominal pass containing a high/critical finding stops for the user when true |
+| `askOnExternalEffects` | `true` | In `auto` mode, detected deploy/publish/push/message/account/billing/DNS effects stop for the user when true |
+
+Destructive intent always stops in `auto` mode. Plan commands change the live
+session only; `/rv setup` writes a persistent choice. Reviewer seats may set
+`"workflows": ["plan_review"]`, `"workflows": ["completion_review"]`, or both.
+Missing `workflows` means both for backward compatibility.
+
+The planner's activation and risk checks are deterministic heuristics, not a
+general authorization oracle. See [Planner Workflow](PLANNER.md) for the
+enforced mutation barrier and complete state flow.
 
 ## Generation health
 

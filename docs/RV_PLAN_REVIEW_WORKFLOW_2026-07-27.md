@@ -1,16 +1,21 @@
 # Resolve Vector Plan Review Workflow
 
-**Status:** implementation brief  
+**Status:** shipped preview; original implementation contract retained below
 **Date:** 2026-07-27  
 **Repository:** `resolve-vector-omp`
 
+> For the concise, normative user guide, see `docs/PLANNER.md`. This file
+> preserves the detailed design contract. Requirements written in future tense
+> describe design intent; `docs/PLANNER.md` distinguishes current behavior
+> from preview limitations.
+
 ## Purpose
 
-Resolve Vector currently reviews an OMP agent's answer after the agent finishes
-working. That catches bad results, but it can discover a bad direction only
-after files were edited and time was spent implementing it.
+Resolve Vector can review an OMP agent's answer after it finishes working.
+The shipped pre-execution planner also catches a bad direction before files
+are edited or external state changes.
 
-Add a pre-execution plan workflow in which:
+The pre-execution plan workflow:
 
 1. OMP proposes a plan before using mutating tools.
 2. RV's independent reviewers critique that plan.
@@ -143,8 +148,9 @@ Auto activation should cover:
   account changes, or infrastructure changes.
 
 It should bypass greetings, questions, explanations, read-only inspection, and
-other trivial/non-mutating requests. `/rv plan` can explicitly start planning
-when deterministic activation does not fire.
+other trivial/non-mutating requests. The current preview does not expose a
+one-shot `/rv plan start` command; use `planning.activation: "always"` when
+broader interception is desired.
 
 Activation must not rely on the primary model claiming confidence.
 
@@ -281,9 +287,10 @@ Do not implement anything during this turn.
 OMP owns the revised plan. RV must not silently synthesize a replacement and
 pretend it came from the primary model.
 
-Review the revised plan again when `reviewRevisedPlan` is enabled. Bound the
-loop with `maxRethinkRounds`; never permit reviewer/model debate to continue
-indefinitely.
+The current safety path always reviews the revised plan.
+`reviewRevisedPlan` remains accepted for configuration compatibility but does
+not disable that check. Bound the loop with `maxRethinkRounds`; never permit
+reviewer/model debate to continue indefinitely.
 
 ## Acceptance and escalation
 
@@ -467,4 +474,3 @@ This feature is complete only when:
 - completion review still verifies the actual implementation;
 - tests and live smokes prove no pre-approval edits and no duplicate execution;
 - setup, configuration, README, and command help document the feature.
-
