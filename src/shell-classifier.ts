@@ -9,9 +9,8 @@ const SAFE_READ_ONLY_PREFIXES = [
   "git diff",
   "git log",
   "git show",
-  "git branch",
-  "git tag",
-  "git remote",
+  "git branch --show-current",
+  "git remote -v",
   "git config --get",
   "ls",
   "dir",
@@ -23,7 +22,6 @@ const SAFE_READ_ONLY_PREFIXES = [
   "grep",
   "ripgrep",
   "rg",
-  "find",
   "file",
   "stat",
   "wc",
@@ -33,7 +31,6 @@ const SAFE_READ_ONLY_PREFIXES = [
   "which",
   "whereis",
   "type",
-  "env",
   "printenv",
   "node -v",
   "node --version",
@@ -46,12 +43,10 @@ const SAFE_READ_ONLY_PREFIXES = [
   "rtk git diff",
   "rtk git log",
   "rtk git show",
-  "rtk git branch",
   "rtk ls",
   "rtk cat",
   "rtk grep",
   "rtk rg",
-  "rtk find",
   "rtk tsc --noEmit",
 ];
 
@@ -93,9 +88,19 @@ export function classifyShellCommand(cmd: string): ClassificationResult {
   const trimmed = cmd.trim();
   if (trimmed.length === 0) return { readOnly: true };
 
+  // Do not bless a safe-looking first command when the shell can execute
+  // additional commands, substitutions, or a pipeline afterward.
+  if (/[;&|`\n\r]|\$\(/.test(trimmed)) {
+    return { readOnly: false, reason: "compound shell syntax is not provably read-only" };
+  }
+
   // Explicit check for shell redirection operators that modify files
-  if (/>|>>|\|\s*(rm|dd|tee\s|sudo\s)/.test(trimmed)) {
+  if (/>|>>/.test(trimmed)) {
     return { readOnly: false, reason: "redirection or piping to mutating command" };
+  }
+
+  if (/^(?:rtk\s+)?(?:rg|ripgrep)\b.*(?:--pre(?:-glob)?)(?:=|\s)/.test(trimmed)) {
+    return { readOnly: false, reason: "ripgrep --pre can execute an external command" };
   }
 
   // Explicit check for known mutating operators

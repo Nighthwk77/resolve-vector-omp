@@ -11,17 +11,6 @@ import { defaultPaths, RVRuntime } from "./runtime.js";
 import { registerCouncilAuditTool } from "./tool.js";
 import { compactGlmUsage, fetchGlmUsage } from "./provider-usage.js";
 
-function extractMessageText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .filter((b): b is { type: "text"; text: string } => typeof b === "object" && b !== null && "text" in b)
-      .map((b) => b.text)
-      .join("");
-  }
-  return "";
-}
-
 export default async function resolveVector(pi: ExtensionAPI): Promise<void> {
   const runtime = await RVRuntime.load(defaultPaths(getAgentDir()));
 
@@ -106,6 +95,14 @@ export default async function resolveVector(pi: ExtensionAPI): Promise<void> {
     ctx.ui.setStatus("rv-glm-usage", compactGlmUsage(usage));
   };
 
+  // Only real user/RPC input may activate pre-execution planning. Extension
+  // continuations (RV's own plan/rethink/correction turns) must never start a
+  // second planning workflow.
+  let pendingUserText: string | undefined;
+  pi.on("input", (event) => {
+    if (event.source !== "extension") pendingUserText = event.text;
+  });
+
   // OMP 17.1.3 blocking tool_call hook for pre-execution mutation barrier
   pi.on("tool_call", (event, _ctx) => {
     const args = (event as { args?: Record<string, unknown>; input?: Record<string, unknown> }).args ?? (event as { input?: Record<string, unknown> }).input ?? {};
@@ -127,18 +124,24 @@ export default async function resolveVector(pi: ExtensionAPI): Promise<void> {
     if (planController.currentState.state === "planning" || planController.currentState.state === "rethinking") {
       void planController.onAgentEnd(event.messages, ctx);
     } else {
+      if (planController.currentState.state === "executing") planController.finishExecution();
       void activation.onAgentEnd(event.messages, ctx);
     }
     void refreshUsage(ctx);
   });
 
   // Pre-execution planning interception
-  pi.on("before_agent_start", (event, _ctx) => {
-    const userText =
-      event && typeof event === "object" && "message" in event && typeof event.message === "object" && event.message && "content" in event.message
-        ? extractMessageText((event.message as any).content)
+  pi.on("before_agent_start", (event, ctx) => {
+    // `BeforeAgentStartEvent` exposes `prompt`, not `message`. Prefer the
+    // input-event value because it also tells us the source was not an
+    // extension-generated continuation.
+    const fallbackPrompt =
+      typeof event.prompt === "string" && !/^\s*(?:\[?Resolve Vector|RV ·)/i.test(event.prompt)
+        ? event.prompt
         : undefined;
-    const planResult = planController.onBeforeAgentStart(userText);
+    const userText = pendingUserText ?? fallbackPrompt;
+    pendingUserText = undefined;
+    const planResult = planController.onBeforeAgentStart(userText, ctx);
     if (planResult) return planResult;
 
     return activation.onBeforeAgentStart();

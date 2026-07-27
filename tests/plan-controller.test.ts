@@ -1,7 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classifyShellCommand } from "../src/shell-classifier.js";
-import { PlanController } from "../src/plan-controller.js";
+import {
+  PlanController,
+  RV_PLAN_PROMPT_TYPE,
+  RV_PLAN_RETHINK_TYPE,
+  RV_PLAN_STEERING_TYPE,
+} from "../src/plan-controller.js";
 import type { RVEngine } from "../src/runtime.js";
 import type { CouncilVerdict } from "../src/receipts.js";
 
@@ -34,6 +39,22 @@ function makeFakeRuntime(mode: "off" | "ask" | "auto" = "ask", verdictStatus: "p
   } as unknown as RVEngine;
 }
 
+function ownedTurn(
+  pc: PlanController,
+  proposal: string,
+  customType: typeof RV_PLAN_PROMPT_TYPE | typeof RV_PLAN_RETHINK_TYPE | typeof RV_PLAN_STEERING_TYPE,
+): unknown[] {
+  return [
+    {
+      role: "custom",
+      customType,
+      details: { correlationId: pc.currentState.correlationId },
+      content: [{ type: "text", text: "hidden RV context" }],
+    },
+    { role: "assistant", content: proposal },
+  ];
+}
+
 test("shell-classifier: classifies read-only commands correctly", () => {
   assert.equal(classifyShellCommand("git status").readOnly, true);
   assert.equal(classifyShellCommand("git diff HEAD~1").readOnly, true);
@@ -48,6 +69,11 @@ test("shell-classifier: classifies mutating commands and fails closed on unknown
   assert.equal(classifyShellCommand("echo 'data' > file.txt").readOnly, false);
   assert.equal(classifyShellCommand("npm install").readOnly, false);
   assert.equal(classifyShellCommand("some-unknown-script.sh").readOnly, false, "unknown script fails closed");
+  assert.equal(classifyShellCommand("git status; curl https://example.com").readOnly, false);
+  assert.equal(classifyShellCommand("git status && unknown-command").readOnly, false);
+  assert.equal(classifyShellCommand("rg pattern | sh").readOnly, false);
+  assert.equal(classifyShellCommand("rg --pre ./script pattern").readOnly, false);
+  assert.equal(classifyShellCommand("find . -delete").readOnly, false);
 });
 
 test("PlanController: mutation barrier blocks mutating tools during planning", () => {
@@ -123,7 +149,10 @@ test("PlanController: ask mode waits for user approval before execution", async 
   pc.onBeforeAgentStart("implement x");
   assert.equal(pc.currentState.state, "planning");
 
-  await pc.onAgentEnd([{ role: "assistant", content: "1. Step A: Implement feature\n2. Step B: Test feature" }], {} as any);
+  await pc.onAgentEnd(
+    ownedTurn(pc, "1. Step A: Implement feature\n2. Step B: Test feature", RV_PLAN_PROMPT_TYPE),
+    {} as any,
+  );
 
   // Should park in awaitingUser in ask mode
   assert.equal(pc.currentState.state, "awaitingUser");
@@ -152,7 +181,10 @@ test("PlanController: auto mode executes safe passing plan automatically", async
   });
 
   pc.onBeforeAgentStart("implement x");
-  await pc.onAgentEnd([{ role: "assistant", content: "1. Step A: Implement feature\n2. Step B: Test feature" }], {} as any);
+  await pc.onAgentEnd(
+    ownedTurn(pc, "1. Step A: Implement feature\n2. Step B: Test feature", RV_PLAN_PROMPT_TYPE),
+    {} as any,
+  );
 
   // Should transition to executing automatically
   assert.equal(pc.currentState.state, "executing");
@@ -176,11 +208,147 @@ test("PlanController: rethink loop triggers on concern and respects maxRethinkRo
   });
 
   pc.onBeforeAgentStart("implement x");
-  await pc.onAgentEnd([{ role: "assistant", content: "1. Initial Plan for feature implementation" }], {} as any);
+  await pc.onAgentEnd(
+    ownedTurn(pc, "1. Initial Plan for feature implementation", RV_PLAN_PROMPT_TYPE),
+    {} as any,
+  );
 
   assert.equal(pc.currentState.state, "rethinking");
   assert.equal(pc.currentState.rethinkRound, 1);
   assert.ok(rethinkPrompt.includes("Rethink the plan"));
+});
+
+test("PlanController: ignores an uncorrelated plan completion", async () => {
+  const runtime = makeFakeRuntime("ask", "pass");
+  const pc = new PlanController(runtime, {
+    notify: () => {},
+    sendPlanPrompt: () => {},
+    sendRethinkPrompt: () => {},
+    sendExecutePrompt: () => {},
+    leafEntryId: () => "leaf-1",
+    lastExchange: () => ({}),
+    primaryFamily: () => "glm",
+  });
+  pc.onBeforeAgentStart("implement feature");
+  await pc.onAgentEnd(
+    [
+      { role: "custom", customType: RV_PLAN_PROMPT_TYPE, details: { correlationId: "wrong" } },
+      { role: "assistant", content: "A complete but unrelated plan" },
+    ],
+    {} as any,
+  );
+  assert.equal(pc.currentState.state, "planning");
+  assert.equal(pc.currentState.originalPlan, undefined);
+});
+
+test("PlanController: ordinary steering reopens rethink and remains mutation-blocked", async () => {
+  const runtime = makeFakeRuntime("ask", "pass");
+  const pc = new PlanController(runtime, {
+    notify: () => {},
+    sendPlanPrompt: () => {},
+    sendRethinkPrompt: () => {},
+    sendExecutePrompt: () => {},
+    leafEntryId: () => "leaf-1",
+    lastExchange: () => ({}),
+    primaryFamily: () => "glm",
+  });
+  pc.onBeforeAgentStart("implement feature");
+  await pc.onAgentEnd(
+    ownedTurn(pc, "1. Implement safely\n2. Test it", RV_PLAN_PROMPT_TYPE),
+    {} as any,
+  );
+  assert.equal(pc.currentState.state, "awaitingUser");
+
+  const steering = pc.onBeforeAgentStart("Keep the public API unchanged", {} as any);
+  assert.equal(pc.currentState.state, "rethinking");
+  assert.equal(pc.onToolCall("edit", {}).block, true);
+  assert.equal(
+    typeof steering?.message === "object" && steering.message !== null
+      ? steering.message.customType
+      : undefined,
+    RV_PLAN_STEERING_TYPE,
+  );
+
+  await pc.onAgentEnd(
+    ownedTurn(pc, "1. Preserve the public API\n2. Implement internally\n3. Test compatibility", RV_PLAN_STEERING_TYPE),
+    {} as any,
+  );
+  assert.equal(pc.currentState.state, "awaitingUser");
+  assert.match(pc.currentState.revisedPlan ?? "", /Preserve the public API/);
+});
+
+test("PlanController: plain-English approval executes without another planning round", async () => {
+  const runtime = makeFakeRuntime("ask", "pass");
+  const pc = new PlanController(runtime, {
+    notify: () => {},
+    sendPlanPrompt: () => {},
+    sendRethinkPrompt: () => {},
+    sendExecutePrompt: () => {},
+    leafEntryId: () => "leaf-1",
+    lastExchange: () => ({}),
+    primaryFamily: () => "glm",
+  });
+  pc.onBeforeAgentStart("implement feature");
+  await pc.onAgentEnd(
+    ownedTurn(pc, "1. Implement safely\n2. Test it", RV_PLAN_PROMPT_TYPE),
+    {} as any,
+  );
+  const approval = pc.onBeforeAgentStart("go ahead", {} as any);
+  assert.equal(pc.currentState.state, "executing");
+  assert.equal(
+    typeof approval?.message === "object" && approval.message !== null
+      ? approval.message.customType
+      : undefined,
+    "rv-plan-execute",
+  );
+  assert.equal(pc.onToolCall("edit", {}).block, false);
+});
+
+test("PlanController: auto mode escalates destructive and external plans", async () => {
+  for (const goal of ["delete the old database", "deploy this release to production"]) {
+    const runtime = makeFakeRuntime("auto", "pass");
+    let executeCalls = 0;
+    const pc = new PlanController(runtime, {
+      notify: () => {},
+      sendPlanPrompt: () => {},
+      sendRethinkPrompt: () => {},
+      sendExecutePrompt: () => {
+        executeCalls += 1;
+      },
+      leafEntryId: () => "leaf-1",
+      lastExchange: () => ({}),
+      primaryFamily: () => "glm",
+    });
+    pc.onBeforeAgentStart(goal);
+    await pc.onAgentEnd(
+      ownedTurn(pc, `1. ${goal}\n2. Verify the result`, RV_PLAN_PROMPT_TYPE),
+      {} as any,
+    );
+    assert.equal(pc.currentState.state, "awaitingUser", goal);
+    assert.equal(executeCalls, 0, goal);
+  }
+});
+
+test("PlanController: execution completion releases the next task", async () => {
+  const runtime = makeFakeRuntime("auto", "pass");
+  const pc = new PlanController(runtime, {
+    notify: () => {},
+    sendPlanPrompt: () => {},
+    sendRethinkPrompt: () => {},
+    sendExecutePrompt: () => {},
+    leafEntryId: () => "leaf-1",
+    lastExchange: () => ({}),
+    primaryFamily: () => "glm",
+  });
+  pc.onBeforeAgentStart("implement feature");
+  await pc.onAgentEnd(
+    ownedTurn(pc, "1. Implement safely\n2. Test it", RV_PLAN_PROMPT_TYPE),
+    {} as any,
+  );
+  assert.equal(pc.currentState.state, "executing");
+  pc.finishExecution();
+  assert.equal(pc.currentState.state, "idle");
+  assert.ok(pc.onBeforeAgentStart("fix the next issue"));
 });
 
 test("PlanController: session reset aborts and clears state", () => {

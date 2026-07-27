@@ -54,6 +54,8 @@ export interface RunReviewRequest {
   activationReason: ReviewReceipt["activationReason"];
   activationDetail?: string;
   revisionRound?: number;
+  workflow?: ReviewReceipt["workflow"];
+  planReview?: ReviewReceipt["planReview"];
   /** Visible progress (reviewing with… / unavailable — continuing with…). */
   onProgress?: (event: CouncilProgressEvent) => void;
 }
@@ -171,11 +173,13 @@ export class RVRuntime implements RVEngine {
     });
     const receipt: ReviewReceipt = {
       receiptId: verdict.id,
+      workflow: request.workflow ?? "completion_review",
       activationReason: request.activationReason,
       activationDetail: request.activationDetail,
       revisionRound: request.revisionRound ?? 0,
       primaryFamily: request.primaryFamily,
       verdict,
+      planReview: request.planReview,
     };
     await appendReceipt(this.paths.receiptsPath, receipt);
     return verdict;

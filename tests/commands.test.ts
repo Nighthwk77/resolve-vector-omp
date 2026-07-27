@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
-import { registerRvCommand } from "../src/commands.js";
+import { registerRvCommand, type ReviewFlowGate } from "../src/commands.js";
 import { DEFAULT_CONFIG, type ActivationMode, type ResolveVectorConfig } from "../src/policy.js";
 import { CircuitBreakerRegistry } from "../src/circuit-breaker.js";
 import type { RVEngine } from "../src/runtime.js";
@@ -42,14 +42,14 @@ function fakeEngine(): RVEngine {
   return engine;
 }
 
-function captureCommand(engine: RVEngine): (args: string, ctx: ExtensionCommandContext) => Promise<void> {
+function captureCommand(engine: RVEngine, gate?: ReviewFlowGate): (args: string, ctx: ExtensionCommandContext) => Promise<void> {
   let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
   const pi = {
     registerCommand: (_name: string, options: { handler: typeof handler }) => {
       handler = options.handler;
     },
   };
-  registerRvCommand(pi as unknown as Parameters<typeof registerRvCommand>[0], engine);
+  registerRvCommand(pi as unknown as Parameters<typeof registerRvCommand>[0], engine, gate);
   assert.ok(handler, "rv command must register");
   const registered = handler;
   return (args, ctx) => registered(args, ctx);
@@ -80,4 +80,36 @@ test("/rv on rejects unknown modes with usage", async () => {
   await handler("on turbo", fakeCtx(notifications));
   assert.equal(engine.config.mode, DEFAULT_CONFIG.mode); // unchanged
   assert.match(notifications[0].message, /usage/i);
+});
+
+test("plan-gate commands route to PlanController before the post-completion gate", async () => {
+  const engine = fakeEngine();
+  const calls: string[] = [];
+  const planController = {
+    currentState: { state: "awaitingUser" },
+    approveAndExecute: () => calls.push("plan-proceed"),
+    revisePlan: (_ctx: unknown, text: string) => calls.push(`plan-revise:${text}`),
+    dismissPlan: () => calls.push("plan-dismiss"),
+    showDetails: () => calls.push("plan-details"),
+  };
+  const gate = {
+    proceedWithPlan: () => calls.push("completion-proceed"),
+    dismissGate: () => calls.push("completion-dismiss"),
+    gateDetails: () => calls.push("completion-details"),
+    planController,
+  } as unknown as ReviewFlowGate;
+  const handler = captureCommand(engine, gate);
+  const ctx = fakeCtx([]);
+
+  await handler("proceed", ctx);
+  await handler("revise preserve the API", ctx);
+  await handler("details", ctx);
+  await handler("dismiss", ctx);
+
+  assert.deepEqual(calls, [
+    "plan-proceed",
+    "plan-revise:preserve the API",
+    "plan-details",
+    "plan-dismiss",
+  ]);
 });

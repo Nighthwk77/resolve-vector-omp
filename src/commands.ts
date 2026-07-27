@@ -242,6 +242,9 @@ async function dispatch(runtime: RVEngine, args: string, ctx: ExtensionCommandCo
     }
     case "proceed":
       if (!gate) return ctx.ui.notify("RV · review flow not active in this session", "warning");
+      if (gate.planController?.currentState.state === "awaitingUser") {
+        return gate.planController.approveAndExecute(ctx as unknown as ExtensionContext);
+      }
       return gate.proceedWithPlan(ctx as unknown as ExtensionContext);
     case "revise": {
       if (!gate) return ctx.ui.notify("RV · review flow not active in this session", "warning");
@@ -250,13 +253,30 @@ async function dispatch(runtime: RVEngine, args: string, ctx: ExtensionCommandCo
         ctx.ui.notify("RV · usage: /rv revise <instructions> — execute the plan with your steering", "warning");
         return;
       }
+      if (gate.planController?.currentState.state === "awaitingUser") {
+        return gate.planController.revisePlan(ctx as unknown as ExtensionContext, instructions);
+      }
       return gate.proceedWithPlan(ctx as unknown as ExtensionContext, instructions);
     }
     case "dismiss":
       if (!gate) return ctx.ui.notify("RV · review flow not active in this session", "warning");
+      if (
+        gate.planController &&
+        gate.planController.currentState.state !== "idle" &&
+        gate.planController.currentState.state !== "cancelled"
+      ) {
+        return gate.planController.dismissPlan(ctx as unknown as ExtensionContext);
+      }
       return gate.dismissGate(ctx as unknown as ExtensionContext);
     case "details":
       if (!gate) return ctx.ui.notify("RV · review flow not active in this session", "warning");
+      if (
+        gate.planController &&
+        gate.planController.currentState.state !== "idle" &&
+        gate.planController.currentState.state !== "cancelled"
+      ) {
+        return gate.planController.showDetails(ctx as unknown as ExtensionContext);
+      }
       return gate.gateDetails(ctx as unknown as ExtensionContext);
     case "status":
       return cmdStatus(runtime, ctx, rest.includes("probe"));
@@ -338,7 +358,7 @@ export function registerRvCommand(pi: ExtensionAPI, runtime: RVEngine, gate?: Re
   pi.registerCommand("rv", {
     description: "Resolve Vector — cross-model review (setup | web | status [probe] | usage | doctor [probe] | review | reviewer retry <id> | proceed | revise <i> | dismiss | details | on [mode] | off | config)",
     getArgumentCompletions: (prefix) => {
-      const subs = ["setup", "web", "status", "usage", "doctor", "review", "reviewer", "proceed", "revise", "dismiss", "details", "on", "off", "config", "best", "fuse", "compare"];
+      const subs = ["setup", "web", "plan", "status", "usage", "doctor", "review", "reviewer", "proceed", "revise", "dismiss", "details", "on", "off", "config", "best", "fuse", "compare"];
       return subs.filter((s) => s.startsWith(prefix)).map((s) => ({ label: s, value: s }));
     },
     handler: (args, ctx) => dispatch(runtime, args, ctx, ompVersion, gate),

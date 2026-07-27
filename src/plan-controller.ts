@@ -47,7 +47,14 @@ export interface PlanControllerState {
   revisionVerdict?: CouncilVerdict;
   workflowTurnIds: string[];
   awaitingDecision?: {
-    reason: "ask_mode" | "split" | "critical" | "exhausted_rethinks" | "destructive" | "external";
+    reason:
+      | "ask_mode"
+      | "split"
+      | "review_unavailable"
+      | "critical"
+      | "exhausted_rethinks"
+      | "destructive"
+      | "external";
     plan: string;
     verdict: CouncilVerdict;
   };
@@ -76,6 +83,7 @@ function isConsequentialTask(text: string): boolean {
 }
 
 const GREETING_RE = /^(hi|hello|hey|thanks|thank you|ok|okay|yes|no|sure|great|nice|got it)\b/i;
+const APPROVE_PLAN_RE = /^(?:yes|y|approve(?: it)?|proceed|go ahead|do it|looks good|start(?: work)?)\s*[.!]?$/i;
 
 export class PlanController {
   private generation = 0;
@@ -177,12 +185,33 @@ export class PlanController {
   /**
    * before_agent_start hook: triggers deterministic activation before mutation.
    */
-  onBeforeAgentStart(userText?: string): BeforeAgentStartEventResult | void {
+  onBeforeAgentStart(userText?: string, ctx?: ExtensionContext): BeforeAgentStartEventResult | void {
     if (this.mode === "off") return;
 
     const gate = this.state.awaitingDecision;
     if (gate && this.state.state === "awaitingUser") {
+      if (userText && APPROVE_PLAN_RE.test(userText.trim())) {
+        this.state.state = "executing";
+        this.state.awaitingDecision = undefined;
+        if (ctx) this.deps.notify(ctx, "RV · plan approved — starting execution…", "info");
+        return {
+          message: {
+            customType: RV_PLAN_EXECUTE_TYPE,
+            content: [
+              {
+                type: "text",
+                text: `The user approved this plan:\n${gate.plan}\n\nExecute it now. Resolve every reviewed requirement and validate the result.`,
+              },
+            ],
+            display: false,
+            details: { correlationId: this.state.correlationId },
+          },
+        };
+      }
       // Ordinary user text at gate acts as steering instructions
+      this.state.state = "rethinking";
+      this.state.awaitingDecision = undefined;
+      if (ctx) this.deps.notify(ctx, "RV · applying your guidance — OMP rethinking the plan…", "info");
       return {
         message: {
           customType: RV_PLAN_STEERING_TYPE,
@@ -198,15 +227,19 @@ export class PlanController {
       };
     }
 
-    if (this.state.state === "idle" && userText && isConsequentialTask(userText)) {
+    const activation = this.runtime.config.planning.activation;
+    const shouldActivate =
+      userText !== undefined &&
+      (activation === "always"
+        ? userText.trim().length > 0 && !GREETING_RE.test(userText.trim())
+        : activation === "auto" && isConsequentialTask(userText));
+    if (this.state.state === "idle" && shouldActivate && userText) {
       this.state.state = "planning";
       this.state.originalGoal = userText;
       this.state.correlationId = `rv-plan-${this.generation.toString(36)}-${Date.now().toString(36)}`;
-      this.deps.notify(
-        { ui: { notify: () => {} } } as unknown as ExtensionContext,
-        "RV · pre-execution plan review active — OMP authoring initial plan…",
-        "info",
-      );
+      if (ctx) {
+        this.deps.notify(ctx, "RV · pre-execution plan review active — OMP authoring initial plan…", "info");
+      }
       return {
         message: {
           customType: RV_PLAN_PROMPT_TYPE,
@@ -230,18 +263,29 @@ export class PlanController {
     if (this.mode === "off" || this.state.state === "idle") return;
 
     const turn = analyzePlanTurn(messages);
-    const leafId = this.deps.leafEntryId(ctx);
-    if (leafId) this.state.workflowTurnIds.push(leafId);
+    const correlationId = this.state.correlationId;
 
     if (this.state.state === "planning") {
+      if (turn.kind !== "plan" || !correlationId || turn.correlationId !== correlationId) return;
       if (!turn.proposal || turn.proposal.length < 15) return;
+      const leafId = this.deps.leafEntryId(ctx);
+      if (leafId && !this.state.workflowTurnIds.includes(leafId)) this.state.workflowTurnIds.push(leafId);
       this.state.originalPlan = turn.proposal;
       await this.reviewPlan(ctx, turn.proposal, false);
       return;
     }
 
     if (this.state.state === "rethinking") {
+      if (
+        (turn.kind !== "rethink" && turn.kind !== "steering") ||
+        !correlationId ||
+        turn.correlationId !== correlationId
+      ) {
+        return;
+      }
       if (!turn.proposal || turn.proposal.length < 15) return;
+      const leafId = this.deps.leafEntryId(ctx);
+      if (leafId && !this.state.workflowTurnIds.includes(leafId)) this.state.workflowTurnIds.push(leafId);
       this.state.revisedPlan = turn.proposal;
       await this.reviewPlan(ctx, turn.proposal, true);
       return;
@@ -266,6 +310,12 @@ export class PlanController {
           primaryFamily: this.deps.primaryFamily(ctx),
           activationReason: isRevision ? "plan_revision" : "plan_initial",
           revisionRound: this.state.rethinkRound,
+          workflow: "plan_review",
+          planReview: {
+            planMode: this.mode,
+            rethinkRounds: this.state.rethinkRound,
+            correlationId: this.state.correlationId,
+          },
         },
         controller.signal,
       );
@@ -277,9 +327,15 @@ export class PlanController {
 
       if (verdict.status === "pass") {
         this.state.state = "accepted";
-        if (this.mode === "auto" && isSafeForAutoExecution(verdict)) {
+        const escalation = autoEscalationReason(
+          verdict,
+          this.state.originalGoal ?? "",
+          plan,
+          this.runtime.config,
+        );
+        if (this.mode === "auto" && escalation === undefined) {
           this.state.state = "executing";
-          this.deps.notify(ctx, "RV · revised plan accepted — OMP starting work", "info");
+          this.deps.notify(ctx, "RV · plan accepted — OMP starting work", "info");
           this.deps.sendExecutePrompt(
             `Plan accepted: ${plan}\n\nExecute the plan now. All tool calls are now unlocked.`,
             this.state.correlationId ?? "",
@@ -287,7 +343,7 @@ export class PlanController {
         } else {
           this.state.state = "awaitingUser";
           this.state.awaitingDecision = {
-            reason: this.mode === "ask" ? "ask_mode" : "external",
+            reason: this.mode === "ask" ? "ask_mode" : (escalation ?? "critical"),
             plan,
             verdict,
           };
@@ -299,7 +355,11 @@ export class PlanController {
       // Verdict is concern, fail, split, or review_unavailable
       if (verdict.status === "split" || verdict.status === "review_unavailable") {
         this.state.state = "awaitingUser";
-        this.state.awaitingDecision = { reason: "split", plan, verdict };
+        this.state.awaitingDecision = {
+          reason: verdict.status === "split" ? "split" : "review_unavailable",
+          plan,
+          verdict,
+        };
         this.presentDecisionPanel(ctx, `Resolve Vector review resulted in ${verdict.status}.`, plan, verdict);
         return;
       }
@@ -347,7 +407,7 @@ export class PlanController {
       "├────────────────────────────────────────────────────────┤",
       "│ What should OMP do?",
       "│   /rv proceed  — Approve and start work",
-      "│   /rv plan     — Change or guide the plan",
+      "│   Type guidance, or /rv revise <instructions> — Change the plan",
       "│   /rv details  — Show complete review details",
       "│   /rv dismiss  — Cancel this work",
       "└────────────────────────────────────────────────────────┘",
@@ -369,6 +429,37 @@ export class PlanController {
       `Plan approved: ${plan}\n\nExecute the plan now. All tool calls are unlocked.`,
       this.state.correlationId ?? "",
     );
+  }
+
+  /** `/rv revise <instructions>` at the pre-execution gate. */
+  revisePlan(ctx: ExtensionContext, instructions: string): void {
+    if (this.state.state !== "awaitingUser" || !this.state.awaitingDecision) {
+      this.deps.notify(ctx, "RV · no pending plan review to revise", "info");
+      return;
+    }
+    const gate = this.state.awaitingDecision;
+    this.state.state = "rethinking";
+    this.state.awaitingDecision = undefined;
+    this.deps.notify(ctx, "RV · applying your guidance — OMP rethinking the plan…", "info");
+    this.deps.sendRethinkPrompt(
+      [
+        "The user requested changes to the proposed plan.",
+        "",
+        `Current plan:\n${gate.plan}`,
+        "",
+        `RV findings:\n${renderFindingsSummary(gate.verdict)}`,
+        "",
+        `User guidance:\n${instructions.trim()}`,
+        "",
+        "Return a complete revised plan. Do not implement or edit files during this turn.",
+      ].join("\n"),
+      this.state.correlationId ?? "",
+    );
+  }
+
+  /** Execution turn settled; release the workflow for the next user task. */
+  finishExecution(): void {
+    if (this.state.state === "executing") this.reset();
   }
 
   dismissPlan(ctx: ExtensionContext): void {
@@ -405,17 +496,38 @@ export class PlanController {
   }
 }
 
-function analyzePlanTurn(messages: readonly unknown[]): { proposal?: string } {
+function analyzePlanTurn(messages: readonly unknown[]): {
+  proposal?: string;
+  kind?: "plan" | "rethink" | "steering";
+  correlationId?: string;
+} {
   let proposal: string | undefined;
+  let kind: "plan" | "rethink" | "steering" | undefined;
+  let correlationId: string | undefined;
   for (const message of messages) {
     if (typeof message === "object" && message !== null && "role" in message) {
+      if (message.role === "custom" && "customType" in message) {
+        if (message.customType === RV_PLAN_PROMPT_TYPE) kind = "plan";
+        if (message.customType === RV_PLAN_RETHINK_TYPE) kind = "rethink";
+        if (message.customType === RV_PLAN_STEERING_TYPE) kind = "steering";
+        if (
+          kind &&
+          "details" in message &&
+          typeof message.details === "object" &&
+          message.details !== null &&
+          "correlationId" in message.details &&
+          typeof message.details.correlationId === "string"
+        ) {
+          correlationId = message.details.correlationId;
+        }
+      }
       if (message.role === "assistant" && "content" in message) {
         const text = extractMessageText(message.content).trim();
         if (text.length > 0) proposal = text;
       }
     }
   }
-  return { proposal };
+  return { proposal, kind, correlationId };
 }
 
 function extractMessageText(content: unknown): string {
@@ -450,8 +562,26 @@ function renderFindingsSummary(verdict: CouncilVerdict): string {
     .join("\n");
 }
 
-function isSafeForAutoExecution(verdict: CouncilVerdict): boolean {
-  if (verdict.status !== "pass") return false;
-  const hasCritical = verdict.findings.some((f) => f.severity === "critical" || f.severity === "high");
-  return !hasCritical;
+const DESTRUCTIVE_INTENT_RE =
+  /\b(delete|remove|wipe|erase|drop|destroy|purge|reset|overwrite|format|uninstall)\b/i;
+const EXTERNAL_EFFECT_RE =
+  /\b(publish|deploy|release|ship to production|push(?:\s+to)?\s+(?:github|gitlab|remote)|send (?:an? )?(?:email|message)|purchase|buy|account|billing|dns|cloudflare)\b/i;
+
+function autoEscalationReason(
+  verdict: CouncilVerdict,
+  goal: string,
+  plan: string,
+  config: ResolveVectorConfig,
+): NonNullable<PlanControllerState["awaitingDecision"]>["reason"] | undefined {
+  if (verdict.status !== "pass") return "critical";
+  if (
+    config.planning.askOnCritical &&
+    verdict.findings.some((f) => f.severity === "critical" || f.severity === "high")
+  ) {
+    return "critical";
+  }
+  const intent = `${goal}\n${plan}`;
+  if (DESTRUCTIVE_INTENT_RE.test(intent)) return "destructive";
+  if (config.planning.askOnExternalEffects && EXTERNAL_EFFECT_RE.test(intent)) return "external";
+  return undefined;
 }
