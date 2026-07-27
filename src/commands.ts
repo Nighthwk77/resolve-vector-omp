@@ -10,7 +10,7 @@ import type { CouncilProgressEvent } from "./council.js";
 import { formatDoctorChecks, runDoctorChecks } from "./doctor.js";
 import { probeReviewerGeneration } from "./health.js";
 import type { ActivationMode } from "./policy.js";
-import { effectiveScope, readLedgerTimestamps } from "./policy.js";
+import { effectiveScope, readLedgerTimestamps, reviewerAppliesTo } from "./policy.js";
 import { resolveReviewer } from "./providers.js";
 import { renderStatusLine, renderVerdict } from "./render.js";
 import type { RVEngine } from "./runtime.js";
@@ -96,7 +96,17 @@ async function cmdStatus(runtime: RVEngine, ctx: ExtensionCommandContext, probe:
             : scope === "external-allowed"
               ? "FULL content externally (trusted endpoint)"
               : "redacted content externally (not a complete privacy boundary)";
-      const flags = [reviewer.local ? "local" : "remote", reviewer.enabled ? "enabled" : "disabled", reviewer.trigger ?? "always", `scope:${scope}`];
+      const workflows = [
+        reviewerAppliesTo(reviewer, "completion_review") ? "issues/completions" : undefined,
+        reviewerAppliesTo(reviewer, "plan_review") ? "planning" : undefined,
+      ].filter(Boolean);
+      const flags = [
+        reviewer.local ? "local" : "remote",
+        reviewer.enabled ? "enabled" : "disabled",
+        reviewer.trigger ?? "always",
+        `scope:${scope}`,
+        `for:${workflows.join("+")}`,
+      ];
       lines.push(`  ${reviewer.order}. ${reviewer.id} — ${reviewer.provider}/${reviewer.model} (${reviewer.family}, ${reviewer.role}) [${flags.join(", ")}]`);
       lines.push(`     → ${receives}`);
       const circuit = runtime.circuits.snapshot(reviewer.id);
@@ -136,7 +146,7 @@ async function cmdStatus(runtime: RVEngine, ctx: ExtensionCommandContext, probe:
 }
 
 async function cmdReview(runtime: RVEngine, ctx: ExtensionCommandContext): Promise<void> {
-  if (runtime.config.reviewers.filter((r) => r.enabled).length === 0) {
+  if (runtime.config.reviewers.filter((r) => r.enabled && reviewerAppliesTo(r, "completion_review")).length === 0) {
     ctx.ui.notify(`RV · no enabled reviewers. Configure resolve-vector.json at ${runtime.paths.configPath}`, "warning");
     return;
   }
@@ -325,7 +335,11 @@ async function dispatch(runtime: RVEngine, args: string, ctx: ExtensionCommandCo
         ctx.ui.notify(`RV · /rv ${sub} [count] — count must be an integer 2-8`, "warning");
         return;
       }
-      if (runtime.config.reviewers.filter((r) => r.enabled).length < 2) {
+      if (
+        runtime.config.reviewers.filter(
+          (r) => r.enabled && reviewerAppliesTo(r, "completion_review"),
+        ).length < 2
+      ) {
         ctx.ui.notify(`RV · /rv ${sub} needs at least 2 enabled reviewers in ${runtime.paths.configPath}`, "warning");
         return;
       }

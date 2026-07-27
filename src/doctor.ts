@@ -8,7 +8,7 @@ import { dirname } from "node:path";
 import type { ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import { probeReviewerGeneration } from "./health.js";
 import { effectiveScope, readLedgerTimestamps } from "./policy.js";
-import { resolveReviewer } from "./providers.js";
+import { isWebSeat, resolveReviewer } from "./providers.js";
 import type { RVEngine } from "./runtime.js";
 
 /** Highest OMP major version RV is verified against (peer range ^17). */
@@ -66,6 +66,42 @@ export async function runDoctorChecks(
   //    local reachability, and — only when asked — generation health.
   for (const reviewer of runtime.config.reviewers) {
     if (!reviewer.enabled) continue;
+    if (isWebSeat(reviewer)) {
+      const app = reviewer.provider.slice("web:".length);
+      try {
+        const detected = await runtime.web.bridge.detectState(app);
+        const ready = detected.state === "ready_authenticated" || detected.state === "ready_anonymous";
+        checks.push({
+          ok: ready,
+          label: `${reviewer.id}: browser advisor ${detected.state}${detected.kind ? ` (${detected.kind})` : ""}`,
+          fix: detected.state === "login_required" ? `/rv web login ${app}` : ready ? undefined : `/rv web status, then /rv web test ${app}`,
+        });
+        if (ready && options.probe) {
+          const resolved = await resolveReviewer(ctx, reviewer);
+          if (resolved.ok) {
+            const probe = await probeReviewerGeneration(runtime.complete, resolved.reviewer, {
+              connectMs: runtime.config.connectTimeoutMs,
+              firstTokenMs: runtime.config.remoteFirstTokenTimeoutMs,
+              totalMs: runtime.config.totalTimeoutMs,
+            });
+            checks.push({
+              ok: probe.ok,
+              label: probe.ok
+                ? `${reviewer.id}: browser consultation healthy (first meaningful token in ${probe.firstTokenLatencyMs ?? "?"}ms)`
+                : `${reviewer.id}: browser consultation UNHEALTHY — ${probe.failureCategory ?? "error"}: ${probe.error ?? ""}`,
+              fix: probe.ok ? undefined : `/rv web test ${app}`,
+            });
+          }
+        }
+      } catch (error) {
+        checks.push({
+          ok: false,
+          label: `${reviewer.id}: browser state check failed — ${(error as Error).message}`,
+          fix: `/rv web status, then /rv web test ${app}`,
+        });
+      }
+      continue;
+    }
     const model = ctx.models.resolve(`${reviewer.provider}/${reviewer.model}`) ?? ctx.models.resolve(reviewer.model);
     if (!model) {
       checks.push({

@@ -46,7 +46,6 @@ node scripts/install.mjs install --with-web
 
 This installs the Playwright Chromium browser (~150 MB). Without it, web
 reviewers stay inert until `/rv web setup` installs the browser on demand.
-```
 
 Restart OMP, then run:
 
@@ -54,12 +53,14 @@ Restart OMP, then run:
 /rv setup
 ```
 
-The native wizard lists your authenticated models (provider, model, family,
-local/external), excludes same-family candidates with reasons, detects local
-endpoints, defaults external seats to redacted transport, and writes the
-config atomically after a review page — no JSON editing required. It finishes
-with `/rv doctor`'s checks and reloads the runtime, so no second restart is
-needed.
+The native wizard lists authenticated API/local models and every browser
+advisor currently usable through either a saved login or anonymous access. It
+excludes same-family candidates with reasons, then lets you independently
+choose exactly which—and how many—reviewers check (1) completed work/issues
+and (2) plans before OMP edits. Models may serve one workflow or both.
+External seats default to redacted transport. The wizard writes atomically
+only after a review page, runs `/rv doctor` checks, and reloads without another
+restart.
 
 The safe starter configuration is manual with no reviewers, so installation
 never starts sending your work to another provider unexpectedly.
@@ -135,7 +136,7 @@ the current session with `/rv on auto`, `/rv on always`, or `/rv off`.
 | `/rv compare [n]` | Show alternatives without forcing a winner |
 | `/rv status [probe]` | Show mode, reviewers, circuit state, budgets, and recent verdicts; `probe` adds a tiny generation-health check |
 | `/rv usage` | Show GLM/Z.ai quota when the local proxy is configured |
-| `/rv setup` | Native wizard: reviewers, privacy scopes, activation mode, atomic write |
+| `/rv setup` | Native wizard: separate planning and completion/issue councils, usable browser advisors, privacy scopes, modes, atomic write |
 | `/rv doctor [probe]` | Check models, credentials, endpoints, paths, privacy, and OMP version; `probe` proves generation health, not just reachability |
 | `/rv reviewer retry <id>` | One half-open probe of a circuit-broken reviewer; closes the circuit on success |
 | `/rv on [auto\|always\|sample]` | Enable automatic review for this session |
@@ -177,7 +178,9 @@ existing login or free access. This covers providers with no API tier.
 **Safety by design.** Prior automation experiments got accounts suspended, so
 this feature is manual-first and conservative:
 
-- **Off by default.** No web consultation happens unless you run `/rv web on`.
+- **Off by default.** No web consultation happens unless you run `/rv web on`,
+  or explicitly select a usable browser advisor in `/rv setup` and approve the
+  final configuration.
 - **Inspect before acting.** Every consultation first detects the page state:
   `ready_authenticated`, `ready_anonymous`, `login_required`, `blocked`, or
   `broken`. A stray "Sign in" header link on a usable page is **not** a login
@@ -219,6 +222,17 @@ registry/API-key path entirely.
 Supported providers: deepseek, chatgpt, gemini, perplexity, claude, kimi, glm.
 Live-tested status varies by site; run `/rv web status` to see the detected
 state for each on your machine.
+
+Each reviewer can be assigned to `completion_review`, `plan_review`, or both:
+
+```json
+{
+  "workflows": ["plan_review"]
+}
+```
+
+Older reviewer entries without `workflows` remain compatible and participate
+in both.
 
 ## Ensembles
 

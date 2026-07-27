@@ -40,18 +40,25 @@ Restart OMP and run:
 
 The wizard is the normal path — no JSON editing, no models.yml inspection:
 
-1. It lists the models already authenticated in your OMP session and shows
-   each candidate's provider, model, family, and local/external endpoint.
+1. It lists the models already authenticated in your OMP session and, when
+   Chromium is installed, scans all supported browser advisors. A browser
+   advisor appears only when its page is usable through a saved login or
+   anonymous access; login walls, blocked pages, and broken pages are excluded.
 2. Models from your primary's family are excluded, with the reason shown —
    cross-family review is the whole point.
-3. Local endpoints are detected automatically and default to `local-only`
+3. You independently select exactly which and how many reviewers check
+   completed work/issues and which check plans before OMP edits. A reviewer
+   may be selected for one workflow or both.
+4. Local endpoints are detected automatically and default to `local-only`
    (content never leaves the machine). External endpoints default to
    `external-redacted`; sending full unredacted content requires an explicit
    yes at a confirmation prompt.
-4. You pick the activation mode (`manual` is recommended initially), review
-   the summary — reviewers, content recipients, scopes, budgets, mode — and
-   confirm before anything is written.
-5. The config is written atomically (existing config backed up first, your
+5. You pick separate completion and plan modes (`manual` and `ask` are
+   recommended initially), review the summary — workflow rosters, content
+   recipients, scopes, budgets, and modes — and confirm before anything is
+   written. Selecting a browser advisor here explicitly enables web
+   consultations; selecting none keeps them off.
+6. The config is written atomically (existing config backed up first, your
    unrelated settings preserved), the runtime reloads without a restart, and
    the wizard finishes with the same checks `/rv doctor` runs.
 
@@ -73,7 +80,9 @@ valid provider/model IDs, and local servers answer `curl
 http://127.0.0.1:8001/v1/models`. For cloud providers, keep `scope:
 "external-redacted"` until you have made an explicit decision to allow full
 content. Local seats use `scope: "local-only"` and send nothing off the
-machine.
+machine. Add `"workflows": ["completion_review"]` or
+`"workflows": ["plan_review"]` to restrict a seat; omit `workflows` to use a
+legacy seat for both.
 
 ## 4. Validate before reviewing
 
@@ -192,8 +201,11 @@ Then inside OMP:
 ```
 
 `/rv web setup` adds `web:<provider>` seats to your roster (default scope
-`external-redacted`). `/rv web status` shows the live detected state for
-each provider on your machine. Web seats feed the same verdict parser,
-repair loop, and council merge as API reviewers — there is no second engine.
+`external-redacted`). The main `/rv setup` wizard also discovers every
+supported site that is currently `ready_authenticated` or `ready_anonymous`
+and lets you assign it separately to plan or completion/issue review.
+`/rv web status` shows the live detected state for each provider on your
+machine. Web seats feed the same verdict parser, repair loop, and council
+merge as API reviewers — there is no second engine.
 
 See the README's "Web-based reviewers" section for the full safety contract.

@@ -8,7 +8,14 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { DEFAULT_CONFIG, type ResolveVectorConfig } from "../src/policy.js";
 import { CircuitBreakerRegistry } from "../src/circuit-breaker.js";
 import type { RVEngine } from "../src/runtime.js";
-import { applySetup, buildCandidateList, isLocalBaseUrl, runSetupWizard, writeConfigAtomic } from "../src/setup.js";
+import {
+  applySetup,
+  buildCandidateList,
+  discoverUsableWebCandidates,
+  isLocalBaseUrl,
+  runSetupWizard,
+  writeConfigAtomic,
+} from "../src/setup.js";
 
 // Model doubles: the wizard reads provider/id/baseUrl only.
 function model(provider: string, id: string, baseUrl: string): Model {
@@ -140,7 +147,14 @@ test("wizard: local seat defaults local-only; external seat defaults external-re
   const h = makeHarness(dir, {
     models: THREE_MODELS,
     primary: THREE_MODELS[0],
-    selects: ["local/qwen-coder", "kimi-code/kimi-for-coding", "manual (recommended)"],
+    selects: [
+      "local/qwen-coder",
+      "kimi-code/kimi-for-coding",
+      "Done selecting",
+      "Use issue/completion reviewers",
+      "manual (recommended)",
+      "ask (recommended)",
+    ],
     confirms: [false, true], // no full-content opt-in; confirm write
     existingConfig: undefined,
   });
@@ -160,7 +174,13 @@ test("wizard: external-allowed requires an explicit confirm", async () => {
   const h = makeHarness(dir, {
     models: THREE_MODELS,
     primary: THREE_MODELS[0],
-    selects: ["kimi-code/kimi-for-coding", "Done selecting", "manual (recommended)"],
+    selects: [
+      "kimi-code/kimi-for-coding",
+      "Done selecting",
+      "Use issue/completion reviewers",
+      "manual (recommended)",
+      "ask (recommended)",
+    ],
     confirms: [true, true], // full-content opt-in; confirm write
   });
   await runSetupWizard(h.runtime, h.ctx, "17.0.7");
@@ -172,8 +192,32 @@ test("wizard: cancellation at every stage leaves config unchanged", async () => 
   const original = '{"mode":"always","customKey":"keep-me","reviewers":[]}';
   const stages: { stage: string; selects: (string | undefined)[]; confirms: boolean[] }[] = [
     { stage: "reviewer select", selects: [undefined], confirms: [] },
-    { stage: "mode select", selects: ["local/qwen-coder", "Done selecting", undefined], confirms: [false] },
-    { stage: "write confirm", selects: ["local/qwen-coder", "Done selecting", "manual (recommended)"], confirms: [false, false] },
+    {
+      stage: "planning reviewer select",
+      selects: ["local/qwen-coder", "Done selecting", undefined],
+      confirms: [],
+    },
+    {
+      stage: "mode select",
+      selects: ["local/qwen-coder", "Done selecting", "Use issue/completion reviewers", undefined],
+      confirms: [],
+    },
+    {
+      stage: "plan mode select",
+      selects: ["local/qwen-coder", "Done selecting", "Use issue/completion reviewers", "manual (recommended)", undefined],
+      confirms: [],
+    },
+    {
+      stage: "write confirm",
+      selects: [
+        "local/qwen-coder",
+        "Done selecting",
+        "Use issue/completion reviewers",
+        "manual (recommended)",
+        "ask (recommended)",
+      ],
+      confirms: [false],
+    },
   ];
   for (const stage of stages) {
     const dir = await mkdtemp(join(tmpdir(), "rv-setup-"));
@@ -194,13 +238,15 @@ test("wizard: cancellation at every stage leaves config unchanged", async () => 
 test("applySetup preserves unrelated existing settings", () => {
   const merged = applySetup(
     { mode: "always", maxExternalAuditsPerHour: 42, _comment: "user note", customFutureKey: { nested: true } },
-    { mode: "auto", reviewers: [] },
+    { mode: "auto", planMode: "ask", reviewers: [], webOptIn: false },
   ) as Record<string, unknown>;
   assert.equal(merged.mode, "auto");
   assert.equal(merged.maxExternalAuditsPerHour, 42);
   assert.equal(merged._comment, "user note");
   assert.deepEqual(merged.customFutureKey, { nested: true });
   assert.deepEqual(merged.reviewers, []);
+  assert.equal((merged.planning as { mode: string }).mode, "ask");
+  assert.equal((merged.webAdvisors as { optIn: boolean }).optIn, false);
 });
 
 test("writeConfigAtomic writes valid JSON and backs up the previous config", async () => {
@@ -222,7 +268,13 @@ test("wizard: full path writes config, reloads runtime, and runs doctor", async 
   const h = makeHarness(dir, {
     models: THREE_MODELS,
     primary: THREE_MODELS[0],
-    selects: ["local/qwen-coder", "Done selecting", "manual (recommended)"],
+    selects: [
+      "local/qwen-coder",
+      "Done selecting",
+      "Use issue/completion reviewers",
+      "manual (recommended)",
+      "ask (recommended)",
+    ],
     confirms: [true],
   });
   await runSetupWizard(h.runtime, h.ctx, "17.0.7");
@@ -239,7 +291,13 @@ test("wizard: secrets never appear in any rendered output", async () => {
   const h = makeHarness(dir, {
     models: [THREE_MODELS[0], sneaky],
     primary: THREE_MODELS[0],
-    selects: ["evil/sk-proj-abc123def456ghi789", "manual (recommended)"],
+    selects: [
+      "evil/sk-proj-abc123def456ghi789",
+      "Done selecting",
+      "Use issue/completion reviewers",
+      "manual (recommended)",
+      "ask (recommended)",
+    ],
     confirms: [false, true],
   });
   // The wizard must never consult the credential store for display.
@@ -262,4 +320,67 @@ test("wizard: no eligible models aborts with guidance and writes nothing", async
   await runSetupWizard(h.runtime, h.ctx, "17.0.7");
   assert.match(h.notifications.join("\n"), /no eligible reviewers/);
   await assert.rejects(readFile(h.runtime.paths.configPath, "utf8"));
+});
+
+test("wizard: usable anonymous web advisors appear and councils are independently selectable", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rv-setup-"));
+  const h = makeHarness(dir, {
+    models: THREE_MODELS,
+    primary: THREE_MODELS[0],
+    selects: [
+      "local/qwen-coder",
+      "Done selecting",
+      "web:gemini",
+      "Done selecting",
+      "manual (recommended)",
+      "auto",
+    ],
+    confirms: [false, true], // redact Gemini content; confirm final write
+  });
+  await runSetupWizard(h.runtime, h.ctx, "17.0.7", {
+    discoverWebCandidates: async () => [
+      {
+        id: "web-gemini",
+        provider: "web:gemini",
+        model: "gemini",
+        family: "google",
+        url: "https://gemini.google.com/app",
+        state: "ready_anonymous",
+      },
+    ],
+  });
+  const written = JSON.parse(await readFile(h.runtime.paths.configPath, "utf8")) as ResolveVectorConfig;
+  const qwen = written.reviewers.find((reviewer) => reviewer.model === "qwen-coder");
+  const gemini = written.reviewers.find((reviewer) => reviewer.provider === "web:gemini");
+  assert.deepEqual(qwen?.workflows, ["completion_review"]);
+  assert.deepEqual(gemini?.workflows, ["plan_review"]);
+  assert.equal(gemini?.scope, "external-redacted");
+  assert.equal(written.planning.mode, "auto");
+  assert.equal(written.webAdvisors.optIn, true);
+});
+
+test("web discovery includes every authenticated/anonymous adapter and excludes unusable states", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rv-setup-"));
+  const h = makeHarness(dir, { models: THREE_MODELS, primary: THREE_MODELS[0] });
+  const states: Record<string, string> = {
+    gemini: "ready_anonymous",
+    chatgpt: "ready_authenticated",
+    claude: "login_required",
+    deepseek: "blocked",
+    perplexity: "broken",
+    kimi: "loading_timeout",
+    glm: "ready_authenticated",
+  };
+  (h.runtime.web as unknown as { bridge: { detectState: (id: string) => Promise<{ state: string; popupClicks: number }> } }).bridge = {
+    detectState: async (id) => ({ state: states[id], popupClicks: 0 }),
+  };
+  const found = await discoverUsableWebCandidates(h.runtime, () => {}, {
+    chromiumInstalled: async () => true,
+  });
+  assert.deepEqual(found.map((candidate) => candidate.provider), ["web:chatgpt", "web:gemini", "web:glm"]);
+  assert.deepEqual(found.map((candidate) => candidate.state), [
+    "ready_authenticated",
+    "ready_anonymous",
+    "ready_authenticated",
+  ]);
 });

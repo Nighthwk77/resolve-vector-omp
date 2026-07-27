@@ -175,3 +175,31 @@ test("open circuit is reported with remaining cooldown and the retry hint", asyn
     await server.close();
   }
 });
+
+test("doctor recognizes a usable anonymous web reviewer without model-registry credentials", async () => {
+  const webReviewer: ReviewerConfig = {
+    id: "web-gemini",
+    provider: "web:gemini",
+    model: "gemini",
+    family: "google",
+    role: "critic",
+    local: false,
+    enabled: true,
+    order: 1,
+    scope: "external-redacted",
+    workflows: ["plan_review"],
+  };
+  const { runtime, ctx } = await makeHarness(
+    "http://127.0.0.1:1",
+    () => Promise.reject(new Error("not under test")),
+    { reviewers: [webReviewer], webAdvisors: { optIn: true, cooldownMs: 0 } },
+  );
+  (runtime.web as unknown as { bridge: { detectState: () => Promise<{ state: "ready_anonymous"; popupClicks: number }> } }).bridge = {
+    detectState: async () => ({ state: "ready_anonymous", popupClicks: 0 }),
+  };
+  const checks = await runDoctorChecks(runtime, ctx, "17.0.7");
+  const web = checks.find((check) => check.label.includes("browser advisor"));
+  assert.equal(web?.ok, true);
+  assert.match(web?.label ?? "", /ready_anonymous/);
+  assert.ok(!checks.some((check) => check.label.includes("does not resolve")));
+});

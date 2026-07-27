@@ -1,5 +1,6 @@
 /**
- * `/rv setup` — native setup wizard (ctx.ui only; no windows, no websites).
+ * `/rv setup` — native setup wizard. UI stays inside OMP; optional web
+ * discovery is headless and read-only (no consultations, no focused windows).
  *
  * Flow: list authenticated models → pick reviewers (same-family as primary
  * excluded with reasons) → per-seat locality + privacy scope (explicit
@@ -10,10 +11,19 @@
 import { copyFile, readFile, rename, writeFile } from "node:fs/promises";
 import type { ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import type { Model } from "@oh-my-pi/pi-ai";
-import type { ActivationMode, ResolveVectorConfig, ReviewerConfig, ReviewerScope } from "./policy.js";
+import type {
+  ActivationMode,
+  PlanMode,
+  ResolveVectorConfig,
+  ReviewerConfig,
+  ReviewerScope,
+  ReviewerWorkflow,
+} from "./policy.js";
 import { DEFAULT_CONFIG } from "./policy.js";
 import { runDoctorChecks, type DoctorCheck } from "./doctor.js";
 import type { RVEngine } from "./runtime.js";
+import { ADAPTERS } from "./web/adapters.mjs";
+import { isChromiumInstalled, type StateDetection } from "./web/manager.js";
 
 export interface CandidateInfo {
   provider: string;
@@ -62,13 +72,23 @@ export interface SetupSelection {
 
 export interface SetupPlan {
   mode: ActivationMode;
+  planMode: PlanMode;
   reviewers: ReviewerConfig[];
+  webOptIn: boolean;
 }
 
 /** Merge the wizard's plan into existing config JSON, preserving unrelated keys. */
 export function applySetup(existing: Record<string, unknown> | undefined, plan: SetupPlan): Record<string, unknown> {
   const base: Record<string, unknown> = { ...DEFAULT_CONFIG, ...(existing ?? {}) };
-  return { ...base, mode: plan.mode, reviewers: plan.reviewers };
+  const oldPlanning = typeof base.planning === "object" && base.planning !== null ? base.planning : {};
+  const oldWeb = typeof base.webAdvisors === "object" && base.webAdvisors !== null ? base.webAdvisors : {};
+  return {
+    ...base,
+    mode: plan.mode,
+    reviewers: plan.reviewers,
+    planning: { ...oldPlanning, mode: plan.planMode },
+    webAdvisors: { ...oldWeb, optIn: plan.webOptIn },
+  };
 }
 
 /** Atomic write: tmp file + rename; existing config backed up first. */
@@ -94,6 +114,112 @@ const MODES: { id: ActivationMode; label: string; hint: string }[] = [
   { id: "sample", label: "sample", hint: "review a random 10% of otherwise quiet turns" },
 ];
 
+const PLAN_MODES: { id: PlanMode; label: string; hint: string }[] = [
+  { id: "ask", label: "ask (recommended)", hint: "review the plan, explain concerns clearly, then wait for your decision" },
+  { id: "auto", label: "auto", hint: "accepted safe plans continue automatically; risky or split plans ask you" },
+  { id: "off", label: "off", hint: "do not run pre-execution plan reviews" },
+];
+
+type UsableWebState = Extract<StateDetection["state"], "ready_authenticated" | "ready_anonymous">;
+
+export interface WebSetupCandidate {
+  id: string;
+  provider: string;
+  model: string;
+  family: string;
+  url: string;
+  state: UsableWebState;
+}
+
+export interface SetupWizardDeps {
+  /** Test seam; production scans every supported web advisor when Chromium exists. */
+  discoverWebCandidates?: (runtime: RVEngine, notify: (message: string) => void) => Promise<WebSetupCandidate[]>;
+}
+
+/**
+ * Inspect every supported web advisor without consulting it. Only providers
+ * with a real usable input (authenticated or anonymous) become setup choices.
+ */
+export async function discoverUsableWebCandidates(
+  runtime: RVEngine,
+  notify: (message: string) => void,
+  options: { chromiumInstalled?: () => Promise<boolean> } = {},
+): Promise<WebSetupCandidate[]> {
+  if (!(await (options.chromiumInstalled ?? isChromiumInstalled)())) return [];
+  if (typeof runtime.web?.bridge?.detectState !== "function") return [];
+
+  const entries = Object.entries(ADAPTERS);
+  notify(`RV setup: checking ${entries.length} browser advisors for authenticated or anonymous access…`);
+  const found: WebSetupCandidate[] = [];
+  // Keep browser pressure modest: two sites at a time, no prompts and no retries.
+  let next = 0;
+  const workers = Array.from({ length: Math.min(2, entries.length) }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= entries.length) return;
+      const [id, adapter] = entries[index];
+      try {
+        const detected = await runtime.web.bridge.detectState(id);
+        if (detected.state === "ready_authenticated" || detected.state === "ready_anonymous") {
+          found.push({
+            id: `web-${id}`,
+            provider: `web:${id}`,
+            model: id,
+            family: adapter.family,
+            url: adapter.url,
+            state: detected.state,
+          });
+        }
+      } catch {
+        // One broken/slow site must not block setup or hide the usable sites.
+      }
+    }
+  });
+  await Promise.all(workers);
+  return found.sort((a, b) => a.provider.localeCompare(b.provider));
+}
+
+interface SelectableCandidate {
+  key: string;
+  label: string;
+  description: string;
+  provider: string;
+  model: string;
+  family: string;
+  local: boolean;
+}
+
+async function selectCouncil(
+  ui: ExtensionCommandContext["ui"],
+  title: string,
+  candidates: readonly SelectableCandidate[],
+  options: { sameAs?: readonly SelectableCandidate[] } = {},
+): Promise<SelectableCandidate[] | undefined> {
+  const selected: SelectableCandidate[] = [];
+  for (;;) {
+    const remaining = candidates.filter((candidate) => !selected.some((picked) => picked.key === candidate.key));
+    const choices = remaining.map((candidate) => ({ label: candidate.label, description: candidate.description }));
+    if (selected.length === 0 && options.sameAs && options.sameAs.length > 0) {
+      choices.unshift({
+        label: "Use issue/completion reviewers",
+        description: `${options.sameAs.length} reviewer(s) — you can still configure the workflows separately later`,
+      });
+    }
+    choices.push(
+      selected.length > 0
+        ? { label: "Done selecting", description: `${selected.length} reviewer(s) chosen for this workflow` }
+        : { label: "No reviewers for this workflow", description: "leave this workflow disabled" },
+    );
+    const picked = await ui.select(title, choices);
+    if (picked === undefined) return undefined;
+    if (picked === "Use issue/completion reviewers") return [...(options.sameAs ?? [])];
+    if (picked === "No reviewers for this workflow") return [];
+    if (picked === "Done selecting") return selected;
+    const candidate = remaining.find((item) => item.label === picked);
+    if (candidate) selected.push(candidate);
+  }
+}
+
 function formatDoctor(checks: readonly DoctorCheck[]): string {
   const failed = checks.filter((c) => !c.ok);
   const lines = [`RV doctor — ${checks.length - failed.length}/${checks.length} checks pass`];
@@ -105,7 +231,12 @@ function formatDoctor(checks: readonly DoctorCheck[]): string {
 }
 
 /** The wizard. Every `undefined` from the UI is a cancellation: write nothing. */
-export async function runSetupWizard(runtime: RVEngine, ctx: ExtensionCommandContext, ompVersion: string): Promise<void> {
+export async function runSetupWizard(
+  runtime: RVEngine,
+  ctx: ExtensionCommandContext,
+  ompVersion: string,
+  deps: SetupWizardDeps = {},
+): Promise<void> {
   const ui = ctx.ui;
   const models = ctx.models.list();
   if (models.length === 0) {
@@ -129,41 +260,64 @@ export async function runSetupWizard(runtime: RVEngine, ctx: ExtensionCommandCon
       "info",
     );
   }
-  const eligible = candidates.filter((c) => c.eligible);
+  const eligibleModels: SelectableCandidate[] = candidates.filter((c) => c.eligible).map((candidate) => ({
+    key: `${candidate.model.provider}/${candidate.model.id}`,
+    label: `${candidate.model.provider}/${candidate.model.id}`,
+    description: `API/model · family ${candidate.family} · ${candidate.local ? "local endpoint" : "external endpoint"}`,
+    provider: candidate.model.provider,
+    model: candidate.model.id,
+    family: candidate.family,
+    local: candidate.local,
+  }));
+
+  const discoverWeb = deps.discoverWebCandidates ?? discoverUsableWebCandidates;
+  const webCandidates = await discoverWeb(runtime, (message) => ui.notify(message, "info"));
+  const eligibleWeb: SelectableCandidate[] = webCandidates
+    .filter((candidate) => candidate.family !== primaryFamily)
+    .map((candidate) => ({
+      key: candidate.provider,
+      label: candidate.provider,
+      description: `browser advisor · family ${candidate.family} · ${candidate.state === "ready_authenticated" ? "signed in" : "anonymous access"} · ${candidate.url}`,
+      provider: candidate.provider,
+      model: candidate.model,
+      family: candidate.family,
+      local: false,
+    }));
+  if (webCandidates.length > eligibleWeb.length) {
+    ui.notify("RV setup: same-family browser advisors were excluded from cross-family review.", "info");
+  }
+
+  const eligible = [...eligibleModels, ...eligibleWeb];
   if (eligible.length === 0) {
     ui.notify(
-      "RV setup: no eligible reviewers — every authenticated model shares your primary's family. Add a different-family model (any provider) and rerun /rv setup.",
+      "RV setup: no eligible reviewers — add a different-family API/local model, or make a supported browser advisor usable and rerun /rv setup.",
       "warning",
     );
     return;
   }
 
-  // 2. Multi-select reviewers (loop until Done/Cancel).
-  const selected: typeof eligible = [];
-  for (;;) {
-    const remaining = eligible.filter((c) => !selected.includes(c));
-    if (remaining.length === 0) break;
-    const options = remaining.map((c) => ({
-      label: `${c.model.provider}/${c.model.id}`,
-      description: `family ${c.family} · ${c.local ? "local endpoint" : "external endpoint"}`,
-    }));
-    if (selected.length > 0) options.push({ label: "Done selecting", description: `${selected.length} reviewer(s) chosen` });
-    const picked = await ui.select(
-      selected.length === 0 ? "RV setup: choose a reviewer model" : "RV setup: add another reviewer, or finish",
-      options,
-    );
-    if (picked === undefined) return; // cancelled — nothing written
-    if (picked === "Done selecting") break;
-    const choice = remaining.find((c) => `${c.model.provider}/${c.model.id}` === picked);
-    if (choice) selected.push(choice);
-    if (selected.length === eligible.length) break;
+  // 2. Independent councils: exact selection determines how many seats each
+  // workflow consults. A seat may belong to one workflow or both.
+  const completionSelected = await selectCouncil(ui, "RV setup: reviewers for completed work and issues", eligible);
+  if (completionSelected === undefined) return;
+  const planningSelected = await selectCouncil(ui, "RV setup: reviewers for OMP plans before edits", eligible, {
+    sameAs: completionSelected,
+  });
+  if (planningSelected === undefined) return;
+  if (completionSelected.length === 0 && planningSelected.length === 0) {
+    ui.notify("RV setup: no reviewers selected for either workflow — configuration unchanged.", "info");
+    return;
   }
-  if (selected.length === 0) return; // cancelled with no selection
 
   // 3. Per-seat privacy scope. external-allowed requires explicit opt-in.
   const reviewers: ReviewerConfig[] = [];
-  for (const [index, candidate] of selected.entries()) {
-    const name = `${candidate.model.provider}/${candidate.model.id}`;
+  const unique = eligible.filter(
+    (candidate) =>
+      completionSelected.some((picked) => picked.key === candidate.key) ||
+      planningSelected.some((picked) => picked.key === candidate.key),
+  );
+  for (const [index, candidate] of unique.entries()) {
+    const name = candidate.label;
     let scope: ReviewerScope;
     if (candidate.local) {
       scope = "local-only";
@@ -177,38 +331,63 @@ export async function runSetupWizard(runtime: RVEngine, ctx: ExtensionCommandCon
     }
     reviewers.push({
       id: name.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase(),
-      provider: candidate.model.provider,
-      model: candidate.model.id,
+      provider: candidate.provider,
+      model: candidate.model,
       family: candidate.family,
       role: index === 0 ? "critic" : "verifier",
       local: candidate.local,
       scope,
       enabled: true,
       order: index + 1,
+      workflows: [
+        ...(completionSelected.some((picked) => picked.key === candidate.key) ? (["completion_review"] as ReviewerWorkflow[]) : []),
+        ...(planningSelected.some((picked) => picked.key === candidate.key) ? (["plan_review"] as ReviewerWorkflow[]) : []),
+      ],
     });
   }
 
-  // 4. Activation mode.
+  // 4. Independent activation modes.
   const modeLabel = await ui.select(
-    "RV setup: activation mode",
+    "RV setup: completed-work/issue review mode",
     MODES.map((m) => ({ label: m.label, description: m.hint })),
   );
   if (modeLabel === undefined) return; // cancelled
   const mode = MODES.find((m) => m.label === modeLabel)?.id ?? "manual";
+  let planMode: PlanMode = "off";
+  if (planningSelected.length > 0) {
+    const planModeLabel = await ui.select(
+      "RV setup: pre-execution plan review mode",
+      PLAN_MODES.map((item) => ({ label: item.label, description: item.hint })),
+    );
+    if (planModeLabel === undefined) return;
+    planMode = PLAN_MODES.find((item) => item.label === planModeLabel)?.id ?? "ask";
+  }
 
   // 5. Review page — nothing written until confirmed here.
   const external = reviewers.filter((r) => !r.local);
+  const completionNames = reviewers.filter((r) => r.workflows?.includes("completion_review")).map((r) => r.id);
+  const planningNames = reviewers.filter((r) => r.workflows?.includes("plan_review")).map((r) => r.id);
+  const hasWeb = reviewers.some((r) => r.provider.startsWith("web:"));
   const lines = [
     "RV setup — review before writing:",
     "",
     "reviewers:",
-    ...reviewers.map((r) => `  ${r.order}. ${r.provider}/${r.model} (${r.family}, ${r.role}) [${r.local ? "local" : "remote"}, scope ${r.scope}]`),
+    ...reviewers.map(
+      (r) =>
+        `  ${r.order}. ${r.provider}/${r.model} (${r.family}, ${r.role}) [${r.local ? "local" : "remote"}, scope ${r.scope}, ${r.workflows?.join(" + ")}]`,
+    ),
+    "",
+    `completed work/issues (${completionNames.length}): ${completionNames.join(", ") || "disabled"}`,
+    `planning (${planningNames.length}, mode ${planMode}): ${planningNames.join(", ") || "disabled"}`,
     "",
     external.length === 0
       ? "content recipients: none — everything stays on this machine"
       : `content recipients: ${external.map((r) => `${r.provider} (${r.scope})`).join(", ")} — redaction is not a complete privacy boundary`,
     `external budgets: ${runtime.config.maxExternalAuditsPerHour}/hour, ${runtime.config.maxExternalAuditsPerDay}/day`,
     `activation mode: ${mode}`,
+    hasWeb
+      ? "browser consultations: ENABLED by this explicit selection; real provider pages are automated headlessly and remain subject to account limits"
+      : "browser consultations: off",
     "",
     `write to ${runtime.paths.configPath}${runtime.configCreated ? " (new file)" : " (existing config backed up first)"}`,
   ];
@@ -222,7 +401,7 @@ export async function runSetupWizard(runtime: RVEngine, ctx: ExtensionCommandCon
   } catch {
     existing = undefined;
   }
-  const merged = applySetup(existing, { mode, reviewers });
+  const merged = applySetup(existing, { mode, planMode, reviewers, webOptIn: hasWeb });
   const backup = await writeConfigAtomic(runtime.paths.configPath, merged);
   await runtime.reload();
   ui.notify(`RV · config written${backup ? ` (backup: ${backup})` : ""} — runtime reloaded, no restart needed.`, "info");

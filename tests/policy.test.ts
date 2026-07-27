@@ -44,6 +44,47 @@ test("parseConfig sorts reviewers by order and defaults enabled", () => {
   assert.equal(config.reviewers[0].enabled, true);
 });
 
+test("reviewer workflows validate while legacy seats remain compatible", () => {
+  const legacy = parseConfig({
+    reviewers: [{ id: "legacy", provider: "p", model: "m", family: "f", role: "critic", local: true, order: 1 }],
+  });
+  assert.deepEqual(legacy.errors, []);
+  assert.equal(legacy.config.reviewers[0].workflows, undefined);
+
+  const scoped = parseConfig({
+    reviewers: [
+      {
+        id: "plan",
+        provider: "p",
+        model: "m",
+        family: "f",
+        role: "critic",
+        local: true,
+        order: 1,
+        workflows: ["plan_review"],
+      },
+    ],
+  });
+  assert.deepEqual(scoped.errors, []);
+  assert.deepEqual(scoped.config.reviewers[0].workflows, ["plan_review"]);
+
+  const invalid = parseConfig({
+    reviewers: [
+      {
+        id: "bad",
+        provider: "p",
+        model: "m",
+        family: "f",
+        role: "critic",
+        local: true,
+        order: 1,
+        workflows: ["not-real"],
+      },
+    ],
+  });
+  assert.ok(invalid.errors.some((error) => error.includes("workflows")));
+});
+
 test("parseConfig rejects out-of-range numbers and non-booleans", () => {
   const { errors } = parseConfig({ sampleRate: 2, runInBackground: "yes", maxConcurrentReviewers: 99 });
   assert.equal(errors.length, 3);

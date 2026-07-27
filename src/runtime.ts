@@ -14,7 +14,15 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { CircuitBreakerRegistry } from "./circuit-breaker.js";
 import type { CouncilDeps, CouncilProgressEvent } from "./council.js";
 import { runCouncil, runEnsemble } from "./council.js";
-import { FileBudgetLedger, loadConfig, type ActivationMode, type BudgetCoordinator, type ResolveVectorConfig } from "./policy.js";
+import {
+  FileBudgetLedger,
+  loadConfig,
+  reviewerAppliesTo,
+  type ActivationMode,
+  type BudgetCoordinator,
+  type ResolveVectorConfig,
+  type ReviewerWorkflow,
+} from "./policy.js";
 import { isWebSeat, resolveReviewer, runReviewerCompletion } from "./providers.js";
 import { WebTransport } from "./web/transport.js";
 import {
@@ -155,13 +163,18 @@ export class RVRuntime implements RVEngine {
   }
 
   async runReview(ctx: ExtensionContext, request: RunReviewRequest, signal?: AbortSignal): Promise<CouncilVerdict> {
+    const workflow: ReviewerWorkflow = request.workflow ?? "completion_review";
+    const workflowConfig = {
+      ...this.config,
+      reviewers: this.config.reviewers.filter((reviewer) => reviewerAppliesTo(reviewer, workflow)),
+    };
     const verdict = await runCouncil({
       goal: request.goal,
       proposal: request.proposal,
       evidence: request.evidence,
       constraints: request.constraints,
       primaryFamily: request.primaryFamily,
-      config: this.config,
+      config: workflowConfig,
       deps: {
         resolveReviewer: (reviewer) => resolveReviewer(ctx, reviewer),
         complete: this.complete,
@@ -173,7 +186,7 @@ export class RVRuntime implements RVEngine {
     });
     const receipt: ReviewReceipt = {
       receiptId: verdict.id,
-      workflow: request.workflow ?? "completion_review",
+      workflow,
       activationReason: request.activationReason,
       activationDetail: request.activationDetail,
       revisionRound: request.revisionRound ?? 0,
@@ -191,6 +204,10 @@ export class RVRuntime implements RVEngine {
   }
 
   async runEnsemble(ctx: ExtensionContext, request: RunEnsembleRequest, signal?: AbortSignal): Promise<CouncilVerdict> {
+    const workflowConfig = {
+      ...this.config,
+      reviewers: this.config.reviewers.filter((reviewer) => reviewerAppliesTo(reviewer, "completion_review")),
+    };
     const verdict = await runEnsemble({
       mode: request.mode,
       goal: request.goal,
@@ -198,7 +215,7 @@ export class RVRuntime implements RVEngine {
       evidence: request.evidence,
       candidateCount: request.candidateCount ?? this.config.candidateCount,
       primaryFamily: request.primaryFamily,
-      config: this.config,
+      config: workflowConfig,
       deps: {
         resolveReviewer: (reviewer) => resolveReviewer(ctx, reviewer),
         complete: this.complete,

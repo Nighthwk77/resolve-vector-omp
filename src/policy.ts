@@ -11,6 +11,7 @@ export type ActivationMode = "off" | "manual" | "auto" | "always" | "sample";
 export type CouncilMode = "review" | "best" | "fusion" | "compare";
 export type ReviewerRole = "critic" | "verifier" | "method" | "judge" | "fusion";
 export type ReviewerTrigger = "always" | "escalation" | "sample";
+export type ReviewerWorkflow = "completion_review" | "plan_review";
 
 /**
  * Privacy scope for a reviewer seat:
@@ -37,11 +38,20 @@ export interface ReviewerConfig {
   order: number;
   trigger?: ReviewerTrigger;
   scope?: ReviewerScope;
+  /**
+   * Workflows this seat reviews. Missing means both, preserving every config
+   * written before workflow-specific councils were introduced.
+   */
+  workflows?: ReviewerWorkflow[];
 }
 
 /** Effective scope: explicit config wins; local defaults local-only, external defaults external-redacted. */
 export function effectiveScope(reviewer: ReviewerConfig): ReviewerScope {
   return reviewer.scope ?? (reviewer.local ? "local-only" : "external-redacted");
+}
+
+export function reviewerAppliesTo(reviewer: ReviewerConfig, workflow: ReviewerWorkflow): boolean {
+  return reviewer.workflows === undefined || reviewer.workflows.includes(workflow);
 }
 
 export interface WebAdvisorsConfig {
@@ -139,6 +149,7 @@ const COUNCIL_MODES: Record<CouncilMode, true> = { review: true, best: true, fus
 const REVIEWER_ROLES: Record<ReviewerRole, true> = { critic: true, verifier: true, method: true, judge: true, fusion: true };
 const REVIEWER_TRIGGERS: Record<ReviewerTrigger, true> = { always: true, escalation: true, sample: true };
 const REVIEWER_SCOPES: Record<ReviewerScope, true> = { "local-only": true, "external-allowed": true, "external-redacted": true };
+const REVIEWER_WORKFLOWS: Record<ReviewerWorkflow, true> = { completion_review: true, plan_review: true };
 
 export interface ConfigLoadResult {
   config: ResolveVectorConfig;
@@ -184,6 +195,15 @@ function validateReviewer(raw: unknown, index: number): { reviewer?: ReviewerCon
   if (scope !== undefined && (typeof scope !== "string" || !REVIEWER_SCOPES[scope as ReviewerScope])) {
     errors.push(`${at}.scope: must be one of ${Object.keys(REVIEWER_SCOPES).join(", ")}`);
   }
+  const workflows = raw.workflows;
+  if (
+    workflows !== undefined &&
+    (!Array.isArray(workflows) ||
+      workflows.length === 0 ||
+      workflows.some((workflow) => typeof workflow !== "string" || !REVIEWER_WORKFLOWS[workflow as ReviewerWorkflow]))
+  ) {
+    errors.push(`${at}.workflows: must be a non-empty array containing ${Object.keys(REVIEWER_WORKFLOWS).join(", ")}`);
+  }
   if (errors.length > 0 || !id || !provider || !model || !family) return { errors };
   return {
     reviewer: {
@@ -197,6 +217,7 @@ function validateReviewer(raw: unknown, index: number): { reviewer?: ReviewerCon
       order,
       trigger: trigger as ReviewerTrigger | undefined,
       scope: scope as ReviewerScope | undefined,
+      workflows: workflows as ReviewerWorkflow[] | undefined,
     },
     errors: [],
   };

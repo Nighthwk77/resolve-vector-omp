@@ -78,6 +78,37 @@ test("concurrent runReview calls share one budget — no snapshot race", async (
   assert.deepEqual(statuses, ["ok", "skipped_budget"]);
 });
 
+test("runReview routes plan and completion workflows to separate reviewer seats", async () => {
+  const paths = await makePaths();
+  const planSeat: ReviewerConfig = {
+    ...remoteReviewer,
+    id: "plan-seat",
+    workflows: ["plan_review"],
+  };
+  const completionSeat: ReviewerConfig = {
+    ...remoteReviewer,
+    id: "completion-seat",
+    model: "completion-model",
+    workflows: ["completion_review"],
+    order: 2,
+  };
+  await writeConfig(paths, {
+    ...DEFAULT_CONFIG,
+    maxExternalAuditsPerHour: 10,
+    reviewers: [planSeat, completionSeat],
+  });
+  const called: string[] = [];
+  const runtime = await RVRuntime.load(paths, {
+    complete: async (reviewer) => {
+      called.push(reviewer.config.id);
+      return passOutput;
+    },
+  });
+  await runtime.runReview(fakeCtx(), { ...baseRequest, workflow: "plan_review" });
+  await runtime.runReview(fakeCtx(), { ...baseRequest, workflow: "completion_review" });
+  assert.deepEqual(called, ["plan-seat", "completion-seat"]);
+});
+
 test("two runtimes (separate omp processes) share the ledger budget", async () => {
   const paths = await makePaths();
   await writeConfig(paths, configCap(1));

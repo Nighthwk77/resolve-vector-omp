@@ -14,6 +14,7 @@
  */
 import type { AgentToolResult, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { EvidenceItem } from "./receipts.js";
+import { reviewerAppliesTo } from "./policy.js";
 import { renderStatusLine, renderVerdict } from "./render.js";
 import type { RVEngine } from "./runtime.js";
 
@@ -115,7 +116,9 @@ export function registerCouncilAuditTool(pi: ExtensionAPI, runtime: RVEngine): v
     execute: async (_toolCallId, rawParams, signal, _onUpdate, ctx) => {
       const params = parseParams(rawParams);
       if (typeof params === "string") return textResult(`council_audit: ${params}`, true);
-      const enabledSeats = runtime.config.reviewers.filter((r) => r.enabled).length;
+      const enabledSeats = runtime.config.reviewers.filter(
+        (r) => r.enabled && reviewerAppliesTo(r, "completion_review"),
+      ).length;
       if (enabledSeats === 0) {
         return textResult(`council_audit unavailable: no enabled reviewers in ${runtime.paths.configPath}.`, true);
       }

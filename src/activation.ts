@@ -28,6 +28,7 @@
  */
 import type { BeforeAgentStartEventResult, ExtensionContext, SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import type { ActivationMode, ResolveVectorConfig } from "./policy.js";
+import { reviewerAppliesTo } from "./policy.js";
 import type { CouncilVerdict, Finding } from "./receipts.js";
 import { renderSplitDetail, renderStatusLine, renderUnavailableDetail, renderVerdict } from "./render.js";
 import type { RVEngine } from "./runtime.js";
@@ -474,7 +475,7 @@ export class ActivationController {
         const { goal, proposal } = this.deps.lastExchange(ctx);
         if (!proposal || proposal.trim().length === 0) return;
         const roster = this.runtime.config.reviewers
-          .filter((r) => r.enabled)
+          .filter((r) => r.enabled && reviewerAppliesTo(r, "completion_review"))
           .map((r) => shortReviewerLabel(r.family, r.id));
         this.deps.notify(
           ctx,
