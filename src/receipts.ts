@@ -63,7 +63,7 @@ export interface ReviewerReceipt {
   transport?: "omp_api" | "interactive_web";
   /** Interactive-web diagnostics. Never contains page content beyond the verdict. */
   web?: {
-    sessionState?: "ready_authenticated" | "ready_anonymous" | "login_required" | "blocked" | "broken";
+    sessionState?: "ready_authenticated" | "ready_anonymous" | "login_required" | "blocked" | "broken" | "loading_timeout" | "bridge_unavailable";
     popupClicks?: number;
     retries?: number;
     webFailureCategory?: string;

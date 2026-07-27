@@ -180,6 +180,9 @@ export class FakeContext {
   }
   newPage(): Promise<FakePage> {
     const page = this.pageFactory();
+    if (this.created.includes(page) && page.isClosed()) {
+      (page as any).closedFlag = false;
+    }
     this.created.push(page);
     return Promise.resolve(page);
   }

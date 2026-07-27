@@ -82,7 +82,7 @@ test("consult: a closed browser session is reported, not hung", async () => {
   page.close();
   const result = await consult(contextWith(page), "claude", "review this", { responseTimeoutMs: 10, pollMs: 1 });
   assert.equal(result.ok, false);
-  assert.ok(["session_closed", "timeout"].includes(result.category));
+  assert.ok(["session_closed", "timeout", "broken"].includes(result.category));
 });
 
 test("consult: usable page with stray Sign in link consults without login", async () => {

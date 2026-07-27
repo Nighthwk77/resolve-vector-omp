@@ -26,10 +26,38 @@ export interface BridgeStatus {
 }
 
 export interface StateDetection {
-  state: "ready_authenticated" | "ready_anonymous" | "login_required" | "blocked" | "broken";
+  state: "ready_authenticated" | "ready_anonymous" | "login_required" | "blocked" | "loading_timeout" | "broken" | "bridge_unavailable";
   kind?: string;
   detail?: string;
   popupClicks: number;
+}
+
+export async function isChromiumInstalled(): Promise<boolean> {
+  try {
+    const { existsSync } = await import("node:fs");
+    const playwright = await import("playwright");
+    const execPath = playwright.chromium.executablePath();
+    return Boolean(execPath && existsSync(execPath));
+  } catch {
+    return false;
+  }
+}
+
+export async function ensureChromiumInstalled(onProgress?: (msg: string) => void): Promise<boolean> {
+  if (await isChromiumInstalled()) return true;
+  onProgress?.("Downloading Playwright Chromium browser binary…");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileAsync = promisify(execFile);
+  try {
+    await execFileAsync("npx", ["playwright", "install", "chromium"], { timeout: 300_000 });
+    const installed = await isChromiumInstalled();
+    if (!installed) onProgress?.("Chromium binary missing after installation.");
+    return installed;
+  } catch (error) {
+    onProgress?.(`Chromium installation failed: ${(error as Error).message}`);
+    return false;
+  }
 }
 
 export interface ConsultResult {

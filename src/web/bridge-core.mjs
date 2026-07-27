@@ -56,110 +56,103 @@ async function readResponses(page, adapter, prompt = "") {
 
 async function consultOnce(ctx, app, prompt, options, diag) {
   const adapter = getAdapter(app);
-  const host = new URL(adapter.url).host;
-  let page = null;
-  for (const p of ctx.pages()) {
-    try {
-      if (new URL(p.url()).host === host && !adapter.newChatPerConsult) {
-        page = p;
-        break;
-      }
-    } catch (_) {
-      /* about:blank */
-    }
-  }
-  if (!page) page = await ctx.newPage();
-  await page.goto(adapter.url, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  const page = await ctx.newPage();
+  try {
+    await page.goto(adapter.url, { waitUntil: "domcontentloaded", timeout: 60_000 });
 
-  // Sweep 1: after navigation, then inspect state before anything else.
-  diag.popupClicks += await dismissPopups(page, adapter);
-  const detected = await detectState(page, adapter);
-  diag.sessionState = detected.state;
-  if (detected.state !== "ready_authenticated" && detected.state !== "ready_anonymous") {
-    const error = new Error(`${app} is not consultable: ${detected.state}${detected.detail ? ` — ${detected.detail}` : ""}`);
-    error.category = detected.state === "blocked" ? `blocked_${detected.kind ?? "interstitial"}` : detected.state;
-    throw error;
-  }
-
-  // Sweep 2: before locating the chat input (a late popup may cover it).
-  diag.popupClicks += await dismissPopups(page, adapter);
-  let input = await findInput(page, adapter, { settleMs: 5000 });
-  if (!input) {
+    // Sweep 1: after navigation, then inspect state before anything else.
     diag.popupClicks += await dismissPopups(page, adapter);
-    input = await findInput(page, adapter, { settleMs: 3000 });
-  }
-  if (!input) {
-    const error = new Error(`no chat input found on ${page.url()} (state was ${detected.state})`);
-    error.category = "broken";
-    throw error;
-  }
-
-  const baseline = await readResponses(page, adapter, prompt);
-
-  // Sweep 3: immediately before submission.
-  diag.popupClicks += await dismissPopups(page, adapter);
-  input = await findInput(page, adapter, { settleMs: 2000 });
-  if (!input) {
-    const error = new Error(`chat input disappeared before submission on ${app}`);
-    error.category = "interrupted";
-    throw error;
-  }
-
-  await input.click();
-  await page.keyboard.insertText(prompt);
-  await page.waitForTimeout(400);
-  await page.keyboard.press("Enter");
-
-  const timeoutMs = options.responseTimeoutMs ?? DEFAULT_RESPONSE_TIMEOUT_MS;
-  const pollMs = options.pollMs ?? POLL_MS;
-  const started = Date.now();
-  let last = "";
-  let stable = 0;
-  let stalledPolls = 0;
-  while (Date.now() - started < timeoutMs) {
-    if (options.signal?.aborted) {
-      const error = new Error("consultation cancelled");
-      error.category = "cancelled";
+    const readinessTimeoutMs = options.readinessTimeoutMs ?? options.responseTimeoutMs ?? 30_000;
+    const detected = await detectState(page, adapter, { timeoutMs: readinessTimeoutMs, signal: options.signal });
+    diag.sessionState = detected.state;
+    if (detected.state !== "ready_authenticated" && detected.state !== "ready_anonymous") {
+      const error = new Error(`${app} is not consultable: ${detected.state}${detected.detail ? ` — ${detected.detail}` : ""}`);
+      error.category = detected.state === "blocked" ? `blocked_${detected.kind ?? "interstitial"}` : detected.state;
       throw error;
     }
-    if (page.isClosed && page.isClosed()) {
-      const error = new Error("browser session closed mid-consultation");
-      error.category = "session_closed";
+
+    // Sweep 2: before locating the chat input (a late popup may cover it).
+    diag.popupClicks += await dismissPopups(page, adapter);
+    let input = await findInput(page, adapter, { settleMs: 5000 });
+    if (!input) {
+      diag.popupClicks += await dismissPopups(page, adapter);
+      input = await findInput(page, adapter, { settleMs: 3000 });
+    }
+    if (!input) {
+      const error = new Error(`no chat input found on ${page.url()} (state was ${detected.state})`);
+      error.category = "broken";
       throw error;
     }
-    await page.waitForTimeout(pollMs);
-    const current = await readResponses(page, adapter, prompt);
-    const isNew = current && current !== baseline && !current.includes(prompt.slice(0, 80));
-    if (isNew && current === last) {
-      stable++;
-      if (stable >= STABLE_POLLS) return cleanResponseText(current, adapter);
-    } else {
-      stable = 0;
+
+    const baseline = await readResponses(page, adapter, prompt);
+
+    // Sweep 3: immediately before submission.
+    diag.popupClicks += await dismissPopups(page, adapter);
+    input = await findInput(page, adapter, { settleMs: 2000 });
+    if (!input) {
+      const error = new Error(`chat input disappeared before submission on ${app}`);
+      error.category = "interrupted";
+      throw error;
     }
-    if (!isNew || current === last) stalledPolls++;
-    else stalledPolls = 0;
-    // Sweep 4: periodically while waiting — mid-conversation interstitials
-    // freeze the visible text while generation continues underneath.
-    if (stalledPolls >= 4) {
-      stalledPolls = 0;
-      const cleared = await dismissPopups(page, adapter);
-      diag.popupClicks += cleared;
-      if (cleared > 0) {
-        last = "";
+
+    await input.click();
+    await page.keyboard.insertText(prompt);
+    await page.waitForTimeout(400);
+    await page.keyboard.press("Enter");
+
+    const timeoutMs = options.responseTimeoutMs ?? DEFAULT_RESPONSE_TIMEOUT_MS;
+    const pollMs = options.pollMs ?? POLL_MS;
+    const started = Date.now();
+    let last = "";
+    let stable = 0;
+    let stalledPolls = 0;
+    while (Date.now() - started < timeoutMs) {
+      if (options.signal?.aborted) {
+        const error = new Error("consultation cancelled");
+        error.category = "cancelled";
+        throw error;
+      }
+      if (page.isClosed && page.isClosed()) {
+        const error = new Error("browser session closed mid-consultation");
+        error.category = "session_closed";
+        throw error;
+      }
+      await page.waitForTimeout(pollMs);
+      const current = await readResponses(page, adapter, prompt);
+      const isNew = current && current !== baseline && !current.includes(prompt.slice(0, 80));
+      if (isNew && current === last) {
+        stable++;
+        if (stable >= STABLE_POLLS) return cleanResponseText(current, adapter);
+      } else {
         stable = 0;
       }
+      if (!isNew || current === last) stalledPolls++;
+      else stalledPolls = 0;
+      // Sweep 4: periodically while waiting — mid-conversation interstitials
+      // freeze the visible text while generation continues underneath.
+      if (stalledPolls >= 4) {
+        stalledPolls = 0;
+        const cleared = await dismissPopups(page, adapter);
+        diag.popupClicks += cleared;
+        if (cleared > 0) {
+          last = "";
+          stable = 0;
+        }
+      }
+      if (isNew) last = current;
+      else last = current || last;
     }
-    if (isNew) last = current;
-    else last = current || last;
+    // Sweep 5: once more before declaring a stall.
+    diag.popupClicks += await dismissPopups(page, adapter);
+    const final = await readResponses(page, adapter, prompt);
+    if (final && final !== baseline) return cleanResponseText(final, adapter);
+    if (last && last !== baseline) return cleanResponseText(last, adapter);
+    const error = new Error(`no response detected within ${timeoutMs / 1000}s on ${app}`);
+    error.category = "timeout";
+    throw error;
+  } finally {
+    await page.close().catch(() => {});
   }
-  // Sweep 5: once more before declaring a stall.
-  diag.popupClicks += await dismissPopups(page, adapter);
-  const final = await readResponses(page, adapter, prompt);
-  if (final && final !== baseline) return cleanResponseText(final, adapter);
-  if (last && last !== baseline) return cleanResponseText(last, adapter);
-  const error = new Error(`no response detected within ${timeoutMs / 1000}s on ${app}`);
-  error.category = "timeout";
-  throw error;
 }
 
 export async function consult(ctx, app, prompt, options = {}) {
@@ -171,10 +164,10 @@ export async function consult(ctx, app, prompt, options = {}) {
       return { ok: true, text, ...diag };
     } catch (error) {
       const category = error.category ?? "error";
-      // Never retry blocked/auth/cancel/broken states; at most one retry for
+      // Never retry blocked/auth/cancel/broken/loading_timeout states; at most one retry for
       // transient transport timeouts. Retrying a selector-drift "broken" page
       // would just re-hit the same unusable state and risk provider noise.
-      const retryable = !["blocked_captcha", "blocked_verification", "blocked_rate_limit", "blocked_interstitial", "login_required", "cancelled", "session_closed", "broken"].includes(category);
+      const retryable = !["blocked_captcha", "blocked_verification", "blocked_rate_limit", "blocked_interstitial", "login_required", "cancelled", "session_closed", "broken", "loading_timeout"].includes(category);
       if (retryable && attempt < TRANSIENT_RETRIES) {
         attempt++;
         diag.retries = attempt;

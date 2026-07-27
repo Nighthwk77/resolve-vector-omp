@@ -69,36 +69,71 @@ export async function inputIsAuthField(page, input) {
 }
 
 /**
- * Detect the provider's current state. Popups should already have been swept
- * once by the caller (post-navigation) before this runs.
+ * Detect the provider's current state with bounded progressive readiness.
+ * Accepts options.timeoutMs (default 15,000ms), options.pollMs (default 500ms),
+ * and options.signal (AbortSignal).
+ *
+ * Distinguishes:
+ * - ready_authenticated
+ * - ready_anonymous
+ * - login_required
+ * - blocked (captcha | verification | rate_limit | interstitial)
+ * - loading_timeout
+ * - broken
  */
-export async function detectState(page, adapter) {
-  const text = await bodyText(page);
+export async function detectState(page, adapter, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const pollMs = options.pollMs ?? 500;
+  const signal = options.signal;
+  const start = Date.now();
 
-  // Hard blocks first: CAPTCHA/verification/quota walls own the page.
-  if (BLOCK_RE.test(text)) {
-    const kind = /captcha|robot|unusual traffic|verify you are human/i.test(text)
-      ? "captcha"
-      : /verify your (email|identity|phone)/i.test(text)
-        ? "verification"
-        : /rate limit|too many requests|usage limit|quota|try again later/i.test(text)
-          ? "rate_limit"
-          : "interstitial";
-    return { state: "blocked", kind, detail: text.slice(0, 200) };
-  }
-
-  const input = await findInput(page, adapter, { settleMs: 8000 });
-  if (input) {
-    if (await inputIsAuthField(page, input)) {
-      return { state: "login_required", detail: "only auth fields are present" };
+  for (;;) {
+    if (signal?.aborted) {
+      const error = new Error("state detection cancelled");
+      error.category = "cancelled";
+      throw error;
     }
-    const authenticated = SESSION_HINT_RE.test(text) && !/^\s*sign in\s*$/im.test(text);
-    return { state: authenticated ? "ready_authenticated" : "ready_anonymous" };
-  }
+    if (page.isClosed && page.isClosed()) {
+      return { state: "broken", detail: "page was closed during state detection" };
+    }
 
-  // No usable input: is it a genuine auth wall or selector drift?
-  if (AUTH_WALL_RE.test(text) || (await hasAuthInputs(page))) {
-    return { state: "login_required", detail: text.slice(0, 200) };
+    const text = await bodyText(page);
+
+    // Hard blocks first: CAPTCHA/verification/quota walls own the page.
+    if (BLOCK_RE.test(text)) {
+      const kind = /captcha|robot|unusual traffic|verify you are human/i.test(text)
+        ? "captcha"
+        : /verify your (email|identity|phone)/i.test(text)
+          ? "verification"
+          : /rate limit|too many requests|usage limit|quota|try again later/i.test(text)
+            ? "rate_limit"
+            : "interstitial";
+      return { state: "blocked", kind, detail: text.slice(0, 200) };
+    }
+
+    const input = await findInput(page, adapter, { settleMs: Math.min(1000, Math.max(100, timeoutMs)) });
+    if (input) {
+      if (await inputIsAuthField(page, input)) {
+        return { state: "login_required", detail: "only auth fields are present" };
+      }
+      const authenticated = SESSION_HINT_RE.test(text) && !/^\s*sign in\s*$/im.test(text);
+      return { state: authenticated ? "ready_authenticated" : "ready_anonymous" };
+    }
+
+    // No usable input: is it a genuine auth wall?
+    if (AUTH_WALL_RE.test(text) || (await hasAuthInputs(page))) {
+      return { state: "login_required", detail: text.slice(0, 200) };
+    }
+
+    const elapsed = Date.now() - start;
+    if (elapsed >= timeoutMs) {
+      const isStillLoading = !text || text.trim().length === 0 || /loading|connecting|please wait/i.test(text);
+      if (isStillLoading) {
+        return { state: "loading_timeout", detail: `page did not settle within ${timeoutMs / 1000}s on ${page.url()}` };
+      }
+      return { state: "broken", detail: `no chat input and no recognized wall on ${page.url()}` };
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, timeoutMs - elapsed)));
   }
-  return { state: "broken", detail: `no chat input and no recognized wall on ${page.url()}` };
 }

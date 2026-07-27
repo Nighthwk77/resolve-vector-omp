@@ -89,10 +89,7 @@ export function mergeStatuses(statuses: readonly VerdictStatus[]): VerdictStatus
 }
 
 /** Map transport-level web diagnostics onto the receipt shape. */
-function toReceiptWeb(
-  web: { sessionState?: "ready_authenticated" | "ready_anonymous" | "login_required" | "blocked" | "broken"; popupClicks?: number; retries?: number; failureCategory?: string } | undefined,
-  category?: string,
-): ReviewerReceipt["web"] {
+function toReceiptWeb(web?: ReviewerOutput["web"], category?: string): ReviewerReceipt["web"] {
   if (!web) return undefined;
   return {
     sessionState: web.sessionState,

@@ -40,7 +40,7 @@ export interface ReviewerOutput {
   metrics?: CallMetrics;
   /** Interactive-web consultation diagnostics (web seats only). */
   web?: {
-    sessionState?: "ready_authenticated" | "ready_anonymous" | "login_required" | "blocked" | "broken";
+    sessionState?: "ready_authenticated" | "ready_anonymous" | "login_required" | "blocked" | "broken" | "loading_timeout" | "bridge_unavailable";
     popupClicks?: number;
     retries?: number;
     failureCategory?: string;

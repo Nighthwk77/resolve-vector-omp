@@ -33,7 +33,35 @@ function webSeats(config: RVEngine["config"]): ReviewerConfig[] {
   return config.reviewers.filter((r) => r.provider.startsWith("web:"));
 }
 
-async function cmdWebSetup(runtime: RVEngine, ctx: ExtensionCommandContext): Promise<void> {
+import { isChromiumInstalled, ensureChromiumInstalled } from "./manager.js";
+
+async function cmdWebSetup(runtime: RVEngine, ctx: ExtensionCommandContext, args: string[] = []): Promise<void> {
+  const withWeb = args.includes("--with-web");
+  const installed = await isChromiumInstalled();
+  if (!installed) {
+    if (withWeb) {
+      const ok = await ensureChromiumInstalled((msg) => ctx.ui.notify(msg, "info"));
+      if (!ok) {
+        ctx.ui.notify("RV web setup: failed to install Playwright Chromium — configuration unchanged.", "warning");
+        return;
+      }
+    } else {
+      const confirmed = await ctx.ui.confirm(
+        "RV web setup: Playwright Chromium browser binary is not installed.",
+        "Web reviewers drive an isolated Chromium browser context. Download Chromium now (~150MB)?",
+      );
+      if (!confirmed) {
+        ctx.ui.notify("RV web setup: installation declined — setup aborted, configuration unchanged.", "info");
+        return;
+      }
+      const ok = await ensureChromiumInstalled((msg) => ctx.ui.notify(msg, "info"));
+      if (!ok) {
+        ctx.ui.notify("RV web setup: Chromium installation failed — configuration unchanged.", "warning");
+        return;
+      }
+    }
+  }
+
   const existing = webSeats(runtime.config);
   const chosen: string[] = [];
   for (;;) {
@@ -189,7 +217,7 @@ export async function dispatchWeb(runtime: RVEngine, rest: string[], ctx: Extens
   const [sub, ...args] = rest;
   switch (sub) {
     case "setup":
-      return cmdWebSetup(runtime, ctx);
+      return cmdWebSetup(runtime, ctx, args);
     case "status":
       return cmdWebStatus(runtime, ctx);
     case "login":

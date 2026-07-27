@@ -20,13 +20,15 @@ const PORT = Number(arg("--port", "3037"));
 const PROFILE_DIR = arg("--profile", path.join(os.homedir(), ".omp", "agent", "rv-web-profile"));
 const LOGIN_APP = arg("--login", null);
 
+const HEADLESS = LOGIN_APP ? false : !process.argv.includes("--no-headless");
+
 let context = null;
 
 async function getContext() {
   if (context) return context;
   const { chromium } = await import("playwright");
   context = await chromium.launchPersistentContext(PROFILE_DIR, {
-    headless: false,
+    headless: HEADLESS,
     viewport: null,
     args: ["--disable-blink-features=AutomationControlled"],
   });
