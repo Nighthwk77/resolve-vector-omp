@@ -10,5 +10,14 @@
   "maxExternalAuditsPerHour": 10,
   "maxExternalAuditsPerDay": 50,
   "maxConcurrentReviewers": 2,
+  "planning": {
+    "mode": "off",
+    "activation": "auto",
+    "maxRethinkRounds": 2,
+    "reviewRevisedPlan": true,
+    "askOnSplit": true,
+    "askOnCritical": true,
+    "askOnExternalEffects": true
+  },
   "reviewers": []
 }

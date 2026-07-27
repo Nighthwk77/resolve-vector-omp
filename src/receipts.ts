@@ -142,12 +142,21 @@ export interface ReviewReceipt {
   receiptId: string;
   sessionId?: string;
   turnId?: string;
-  activationReason: "manual_command" | "tool_call" | "agent_end" | "revision";
+  workflow?: "completion_review" | "plan_review";
+  activationReason: "manual_command" | "tool_call" | "agent_end" | "revision" | "plan_initial" | "plan_revision";
   /** Deterministic activation signal that fired (e.g. files_changed, always, sample:0.031). */
   activationDetail?: string;
   revisionRound: number;
   primaryFamily?: string;
   verdict: CouncilVerdict;
+  planReview?: {
+    planMode: "off" | "ask" | "auto";
+    rethinkRounds: number;
+    acceptanceSource?: "user" | "auto_policy" | "dismissed";
+    escalationReason?: string;
+    correlationId?: string;
+    correlatedCompletionReceiptId?: string;
+  };
 }
 
 let receiptCounter = 0;

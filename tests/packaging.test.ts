@@ -36,14 +36,8 @@ test("packaged artifact: contents and install/update/rollback/uninstall cycle", 
     "package/LICENSE",
     "package/README.md",
     "package/src/index.ts",
-    "package/src/web/adapters.mjs",
-    "package/src/web/bridge-core.mjs",
-    "package/src/web/bridge-entry.mjs",
-    "package/src/web/commands.ts",
-    "package/src/web/detect.mjs",
-    "package/src/web/manager.ts",
-    "package/src/web/popups.mjs",
-    "package/src/web/transport.ts",
+    "package/src/plan-controller.ts",
+    "package/src/shell-classifier.ts",
     "package/hooks/completion-gate.ts",
     "package/resolve-vector.example.json",
     "package/examples/local-openai-compatible.json",
@@ -55,6 +49,15 @@ test("packaged artifact: contents and install/update/rollback/uninstall cycle", 
   for (const entry of required) {
     assert.ok(listing.includes(entry), `tarball missing ${entry}`);
   }
+
+  // Every web sidecar file must ship. Enumerated from disk rather than
+  // hand-listed so a newly added file cannot silently escape this guard.
+  const webFiles = (await readdir(join(REPO, "src", "web"))).sort();
+  assert.ok(webFiles.length > 0, "src/web is empty — web sidecar missing from the source tree");
+  for (const file of webFiles) {
+    assert.ok(listing.includes(`package/src/web/${file}`), `tarball missing package/src/web/${file}`);
+  }
+
   assert.ok(!listing.includes("package/tests/"), "tests must not ship");
   assert.ok(!listing.includes("package/node_modules/"), "node_modules must not ship");
 

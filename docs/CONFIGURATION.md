@@ -33,6 +33,7 @@ Receipts and the budget ledger stay in the agent directory.
 | `maxReviewOutputTokens` | `4096` | Max output tokens per reviewer call (repair calls included) |
 | `reviewers` | `[]` | Reviewer seat definitions |
 | `webAdvisors` | `{ optIn: false, cooldownMs: 60000 }` | Optional website-based reviewers: `optIn` must be true to consult any `web:<provider>` seat (enable via `/rv web on`); `cooldownMs` is the per-provider throttle between same-site consultations |
+| `planning` | `{ mode: "off", ... }` | Pre-execution plan review settings (`mode`: `off` \| `ask` \| `auto`, `maxRethinkRounds`: `2`, `reviewRevisedPlan`: `true`) |
 
 ## Generation health
 

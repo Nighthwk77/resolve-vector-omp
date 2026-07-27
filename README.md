@@ -146,6 +146,11 @@ the current session with `/rv on auto`, `/rv on always`, or `/rv off`.
 | `/rv web login <provider>` | Open the provider's site in a visible browser window so you can sign in once; the session persists in an RV-only profile |
 | `/rv web test <provider>` | Run exactly one consultation (`Reply with exactly: RV-OK`) to verify the bridge works, after inspecting page state |
 | `/rv web on` / `/rv web off` | Opt web consultations into/out of the reviewer council (off by default) |
+| `/rv plan ask` | Enable pre-execution plan review; asks for user approval before edits |
+| `/rv plan auto` | Enable pre-execution plan review; automatically executes safe accepted plans |
+| `/rv plan off` | Disable pre-execution plan review |
+| `/rv plan status` | Show pre-execution planning mode, current state, and rethink rounds |
+| `/rv plan details` | Show the proposed plan, reviewer findings, and revised plan |
 
 The model-callable `council_audit` tool uses the same review engine.
 

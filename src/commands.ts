@@ -18,11 +18,14 @@ import { detailedGlmUsage, fetchGlmUsage } from "./provider-usage.js";
 import { runSetupWizard } from "./setup.js";
 import { dispatchWeb } from "./web/commands.js";
 
-/** Plan-gate facade the ActivationController implements for gate subcommands. */
+import type { PlanController } from "./plan-controller.js";
+
+/** Plan-gate facade the ActivationController and PlanController implement for gate subcommands. */
 export interface ReviewFlowGate {
   proceedWithPlan: (ctx: ExtensionContext, instructions?: string) => void;
   dismissGate: (ctx: ExtensionContext) => void;
   gateDetails: (ctx: ExtensionContext) => void;
+  planController?: PlanController;
 }
 
 /** "A and B" / "A, B and C" — the progress-line roster format. */
@@ -201,6 +204,42 @@ async function cmdReviewerRetry(runtime: RVEngine, ctx: ExtensionCommandContext,
 async function dispatch(runtime: RVEngine, args: string, ctx: ExtensionCommandContext, ompVersion: string, gate?: ReviewFlowGate): Promise<void> {
   const [sub = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
   switch (sub) {
+    case "plan": {
+      const [planSub = "status"] = rest;
+      const pc = gate?.planController;
+      if (planSub === "ask") {
+        runtime.config.planning.mode = "ask";
+        if (pc) pc.setMode("ask");
+        ctx.ui.notify("RV plan · ask mode enabled (pre-execution plan review; asks for approval before edits)", "info");
+        return;
+      }
+      if (planSub === "auto") {
+        runtime.config.planning.mode = "auto";
+        if (pc) pc.setMode("auto");
+        ctx.ui.notify("RV plan · auto mode enabled (pre-execution plan review; executes accepted low-risk plans)", "info");
+        return;
+      }
+      if (planSub === "off") {
+        runtime.config.planning.mode = "off";
+        if (pc) pc.setMode("off");
+        ctx.ui.notify("RV plan · off (pre-execution plan review disabled)", "info");
+        return;
+      }
+      if (planSub === "status") {
+        const mode = runtime.config.planning.mode;
+        const planState = pc ? pc.currentState.state : "idle";
+        const rethinkRound = pc ? pc.currentState.rethinkRound : 0;
+        ctx.ui.notify(`RV plan · mode: ${mode} · state: ${planState} · rethink rounds: ${rethinkRound}`, "info");
+        return;
+      }
+      if (planSub === "details") {
+        if (pc) pc.showDetails(ctx as unknown as ExtensionContext);
+        else ctx.ui.notify("RV plan · no active plan review details in this session", "info");
+        return;
+      }
+      ctx.ui.notify("RV plan · usage: /rv plan ask|auto|off|status|details", "warning");
+      return;
+    }
     case "proceed":
       if (!gate) return ctx.ui.notify("RV · review flow not active in this session", "warning");
       return gate.proceedWithPlan(ctx as unknown as ExtensionContext);

@@ -52,6 +52,18 @@ export interface WebAdvisorsConfig {
   cooldownMs: number;
 }
 
+export type PlanMode = "off" | "ask" | "auto";
+
+export interface PlanningConfig {
+  mode: PlanMode;
+  activation: "auto" | "manual" | "always";
+  maxRethinkRounds: number;
+  reviewRevisedPlan: boolean;
+  askOnSplit: boolean;
+  askOnCritical: boolean;
+  askOnExternalEffects: boolean;
+}
+
 export interface ResolveVectorConfig {
   mode: ActivationMode;
   defaultCouncilMode: CouncilMode;
@@ -79,6 +91,7 @@ export interface ResolveVectorConfig {
   maxReviewOutputTokens: number;
   reviewers: ReviewerConfig[];
   webAdvisors: WebAdvisorsConfig;
+  planning: PlanningConfig;
 }
 
 /** Resolve the three generation deadlines for one seat from config. */
@@ -110,6 +123,15 @@ export const DEFAULT_CONFIG: ResolveVectorConfig = {
   maxReviewOutputTokens: 4096,
   reviewers: [],
   webAdvisors: { optIn: false, cooldownMs: 60_000 },
+  planning: {
+    mode: "off",
+    activation: "auto",
+    maxRethinkRounds: 2,
+    reviewRevisedPlan: true,
+    askOnSplit: true,
+    askOnCritical: true,
+    askOnExternalEffects: true,
+  },
 };
 
 const ACTIVATION_MODES: Record<ActivationMode, true> = { off: true, manual: true, auto: true, always: true, sample: true };
@@ -262,6 +284,42 @@ export function parseConfig(raw: unknown): { config: ResolveVectorConfig; errors
           config.webAdvisors.cooldownMs = raw.webAdvisors.cooldownMs;
         } else {
           errors.push("webAdvisors.cooldownMs: must be a number >= 0");
+        }
+      }
+    }
+  }
+
+  if (raw.planning !== undefined) {
+    if (!isRecord(raw.planning)) {
+      errors.push("planning: must be an object");
+    } else {
+      config.planning = { ...DEFAULT_CONFIG.planning };
+      if (raw.planning.mode !== undefined) {
+        if (typeof raw.planning.mode === "string" && ["off", "ask", "auto"].includes(raw.planning.mode)) {
+          config.planning.mode = raw.planning.mode as PlanMode;
+        } else {
+          errors.push("planning.mode: must be one of off, ask, auto");
+        }
+      }
+      if (raw.planning.activation !== undefined) {
+        if (typeof raw.planning.activation === "string" && ["auto", "manual", "always"].includes(raw.planning.activation)) {
+          config.planning.activation = raw.planning.activation as "auto" | "manual" | "always";
+        } else {
+          errors.push("planning.activation: must be one of auto, manual, always");
+        }
+      }
+      if (raw.planning.maxRethinkRounds !== undefined) {
+        if (typeof raw.planning.maxRethinkRounds === "number" && raw.planning.maxRethinkRounds >= 0 && raw.planning.maxRethinkRounds <= 10) {
+          config.planning.maxRethinkRounds = raw.planning.maxRethinkRounds;
+        } else {
+          errors.push("planning.maxRethinkRounds: must be a number in [0, 10]");
+        }
+      }
+      for (const boolKey of ["reviewRevisedPlan", "askOnSplit", "askOnCritical", "askOnExternalEffects"] as const) {
+        const val = raw.planning[boolKey];
+        if (val !== undefined) {
+          if (typeof val === "boolean") config.planning[boolKey] = val;
+          else errors.push(`planning.${boolKey}: must be boolean`);
         }
       }
     }

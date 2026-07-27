@@ -6,3 +6,6 @@ coverage/
 .env
 .env.*
 !.env.example
+
+# Local verification reports — not part of the distribution
+EVIDENCE-*.md
