@@ -4,6 +4,8 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { CANDIDATE_SYSTEM_PROMPT } from "../src/candidates.js";
+import { JUDGE_SYSTEM_PROMPT } from "../src/judge.js";
 import { DEFAULT_CONFIG, type ResolveVectorConfig, type ReviewerConfig } from "../src/policy.js";
 import { RVRuntime, type RuntimePaths } from "../src/runtime.js";
 
@@ -28,10 +30,12 @@ function configCap(hourly: number): ResolveVectorConfig {
 
 /** ctx double: only the models/modelRegistry surface resolveReviewer touches. */
 function fakeCtx(): ExtensionContext {
+  const primary = { provider: "zai", id: "glm-5", baseUrl: "https://api.z.ai" };
   const ctx = {
+    model: primary,
     models: {
       resolve: (spec: string) => ({ provider: spec.split("/")[0], id: spec }),
-      family: () => "deepseek-fam",
+      family: (model: { provider: string }) => model.provider === "zai" ? "glm-fam" : "deepseek-fam",
     },
     modelRegistry: { getApiKey: async () => "fake-key" },
   };
@@ -107,6 +111,53 @@ test("runReview routes plan and completion workflows to separate reviewer seats"
   await runtime.runReview(fakeCtx(), { ...baseRequest, workflow: "plan_review" });
   await runtime.runReview(fakeCtx(), { ...baseRequest, workflow: "completion_review" });
   assert.deepEqual(called, ["plan-seat", "completion-seat"]);
+});
+
+test("runEnsemble uses the active OMP model plus one configured reviewer", async () => {
+  const paths = await makePaths();
+  await writeConfig(paths, {
+    ...DEFAULT_CONFIG,
+    candidateCount: 2,
+    maxExternalAuditsPerHour: 10,
+    reviewers: [remoteReviewer],
+  });
+  const generatedBy: string[] = [];
+  const runtime = await RVRuntime.load(paths, {
+    complete: async (reviewer, system) => {
+      if (system === CANDIDATE_SYSTEM_PROMPT) {
+        generatedBy.push(reviewer.config.id);
+        return { text: `answer from ${reviewer.config.id}` };
+      }
+      if (system === JUDGE_SYSTEM_PROMPT) {
+        return {
+          text: JSON.stringify({
+            scores: ["candidate-A", "candidate-B"].map((candidate) => ({
+              candidate,
+              intent: 4,
+              correctness: 4,
+              completeness: 4,
+              evidence: 4,
+              reasoning: 4,
+              constraints: 4,
+              practicality: 4,
+              note: "sound",
+            })),
+          }),
+        };
+      }
+      throw new Error("unexpected ensemble call");
+    },
+  });
+  const verdict = await runtime.runEnsemble(fakeCtx(), {
+    mode: "best",
+    goal: "solve it",
+    candidateCount: 2,
+    primaryFamily: "glm-fam",
+    activationReason: "manual_command",
+  });
+  assert.notEqual(verdict.status, "review_unavailable");
+  assert.deepEqual(generatedBy.sort(), ["omp-primary", "remote-seat"]);
+  assert.equal(verdict.candidates?.length, 2);
 });
 
 test("two runtimes (separate omp processes) share the ledger budget", async () => {
