@@ -21,6 +21,7 @@ import {
   type ActivationMode,
   type BudgetCoordinator,
   type ResolveVectorConfig,
+  type ReviewerConfig,
   type ReviewerWorkflow,
 } from "./policy.js";
 import { isWebSeat, resolveReviewer, runReviewerCompletion } from "./providers.js";
@@ -107,6 +108,33 @@ export interface RuntimeOptions {
   complete?: CouncilDeps["complete"];
   /** DI seam: budget coordinator. Defaults to the shared file ledger. */
   budget?: BudgetCoordinator;
+}
+
+/** Ensembles need independent solvers, so include the active OMP model as one seat. */
+export function ensembleReviewers(
+  ctx: ExtensionContext,
+  configured: readonly ReviewerConfig[],
+): ReviewerConfig[] {
+  const reviewers = [...configured];
+  const model = ctx.model;
+  if (!model) return reviewers;
+  if (reviewers.some((reviewer) => reviewer.provider === model.provider && reviewer.model === model.id)) {
+    return reviewers;
+  }
+  const local = /^https?:\/\/(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::|\/|$)/i.test(model.baseUrl ?? "");
+  reviewers.unshift({
+    id: "omp-primary",
+    provider: model.provider,
+    model: model.id,
+    family: ctx.models.family(model),
+    role: "critic",
+    local,
+    enabled: true,
+    order: 0,
+    scope: local ? "local-only" : "external-redacted",
+    workflows: ["completion_review"],
+  });
+  return reviewers;
 }
 
 export class RVRuntime implements RVEngine {
@@ -204,9 +232,10 @@ export class RVRuntime implements RVEngine {
   }
 
   async runEnsemble(ctx: ExtensionContext, request: RunEnsembleRequest, signal?: AbortSignal): Promise<CouncilVerdict> {
+    const configured = this.config.reviewers.filter((reviewer) => reviewerAppliesTo(reviewer, "completion_review"));
     const workflowConfig = {
       ...this.config,
-      reviewers: this.config.reviewers.filter((reviewer) => reviewerAppliesTo(reviewer, "completion_review")),
+      reviewers: ensembleReviewers(ctx, configured),
     };
     const verdict = await runEnsemble({
       mode: request.mode,
@@ -214,7 +243,9 @@ export class RVRuntime implements RVEngine {
       constraints: request.constraints,
       evidence: request.evidence,
       candidateCount: request.candidateCount ?? this.config.candidateCount,
-      primaryFamily: request.primaryFamily,
+      // Unlike review mode, ensembles intentionally include the primary as an
+      // independent candidate generator. Identity is stripped before judging.
+      primaryFamily: undefined,
       config: workflowConfig,
       deps: {
         resolveReviewer: (reviewer) => resolveReviewer(ctx, reviewer),

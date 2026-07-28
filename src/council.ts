@@ -562,13 +562,10 @@ async function callSeat(
   }
 }
 
-/** Role-preferred seat picker; falls back to the first runnable seat. */
-function pickSeat(runnable: readonly ResolvedReviewer[], roles: readonly string[]): ResolvedReviewer | undefined {
-  for (const role of roles) {
-    const seat = runnable.find((r) => r.config.role === role);
-    if (seat) return seat;
-  }
-  return runnable[0];
+/** Preferred-role order followed by every remaining seat, without duplicates. */
+function seatsByPreference(runnable: readonly ResolvedReviewer[], roles: readonly string[]): ResolvedReviewer[] {
+  const preferred = roles.flatMap((role) => runnable.filter((seat) => seat.config.role === role));
+  return [...preferred, ...runnable.filter((seat) => !preferred.includes(seat))];
 }
 
 function ensembleUsage(receipts: readonly (ReviewerReceipt | CandidateReceipt)[], totalLatencyMs: number) {
@@ -654,20 +651,25 @@ export async function runEnsemble(input: RunEnsembleInput): Promise<CouncilVerdi
     }
 
     // 5. Blind judging (also used by compare).
-    const judgeSeat = pickSeat(seats.runnable, ["judge"]);
-    if (!judgeSeat) return unavailable("no runnable seat available for judging");
-    const judgeCall = await callSeat(
-      judgeSeat,
-      JUDGE_SYSTEM_PROMPT,
-      buildJudgePrompt(input.goal, input.constraints, anon),
-      deps,
-      reserveFor(config, deps),
-      now,
-      { signal: deps.signal, deadlines: reviewerDeadlines(judgeSeat.config, config), maxTokens: config.maxReviewOutputTokens },
-    );
-    reviewerReceipts.push(judgeCall.receipt);
-    if (!judgeCall.output) return unavailable(`judge call failed: ${judgeCall.receipt.error ?? "unknown"}`);
-    const judgeScores = parseJudgeResponse(judgeCall.output.text);
+    let judgeOutput: ReviewerOutput | undefined;
+    for (const judgeSeat of seatsByPreference(seats.runnable, ["judge"])) {
+      const judgeCall = await callSeat(
+        judgeSeat,
+        JUDGE_SYSTEM_PROMPT,
+        buildJudgePrompt(input.goal, input.constraints, anon),
+        deps,
+        reserveFor(config, deps),
+        now,
+        { signal: deps.signal, deadlines: reviewerDeadlines(judgeSeat.config, config), maxTokens: config.maxReviewOutputTokens },
+      );
+      reviewerReceipts.push(judgeCall.receipt);
+      if (judgeCall.output) {
+        judgeOutput = judgeCall.output;
+        break;
+      }
+    }
+    if (!judgeOutput) return unavailable("every runnable judge seat failed");
+    const judgeScores = parseJudgeResponse(judgeOutput.text);
 
     const scored: ScoredCandidate[] = anon.map((candidate) => {
       const entry = judgeScores.find((s) => s.candidate === candidate.anonId);
@@ -757,20 +759,27 @@ export async function runEnsemble(input: RunEnsembleInput): Promise<CouncilVerdi
     }
 
     // 6. Fusion: conflict-aware synthesis, then one final independent review.
-    const fusionSeat = pickSeat(seats.runnable, ["fusion", "judge"]);
-    if (!fusionSeat) return unavailable("no runnable seat available for fusion");
-    const fusionCall = await callSeat(
-      fusionSeat,
-      FUSION_SYSTEM_PROMPT,
-      buildFusionPrompt(input.goal, input.constraints, anon),
-      deps,
-      reserveFor(config, deps),
-      now,
-      { signal: deps.signal, deadlines: reviewerDeadlines(fusionSeat.config, config), maxTokens: config.maxReviewOutputTokens },
-    );
-    reviewerReceipts.push(fusionCall.receipt);
-    if (!fusionCall.output) return unavailable(`fusion call failed: ${fusionCall.receipt.error ?? "unknown"}`);
-    const plan = parseFusionPlan(fusionCall.output.text);
+    let fusionOutput: ReviewerOutput | undefined;
+    let fusionSeat: ResolvedReviewer | undefined;
+    for (const seat of seatsByPreference(seats.runnable, ["fusion", "judge"])) {
+      const fusionCall = await callSeat(
+        seat,
+        FUSION_SYSTEM_PROMPT,
+        buildFusionPrompt(input.goal, input.constraints, anon),
+        deps,
+        reserveFor(config, deps),
+        now,
+        { signal: deps.signal, deadlines: reviewerDeadlines(seat.config, config), maxTokens: config.maxReviewOutputTokens },
+      );
+      reviewerReceipts.push(fusionCall.receipt);
+      if (fusionCall.output) {
+        fusionOutput = fusionCall.output;
+        fusionSeat = seat;
+        break;
+      }
+    }
+    if (!fusionOutput || !fusionSeat) return unavailable("every runnable fusion seat failed");
+    const plan = parseFusionPlan(fusionOutput.text);
 
     for (const conflict of plan.unresolved) {
       findings.push({
@@ -782,21 +791,28 @@ export async function runEnsemble(input: RunEnsembleInput): Promise<CouncilVerdi
       });
     }
 
-    const reviewSeat = pickSeat(seats.runnable, ["verifier", "method"]) ?? fusionSeat;
-    const reviewReceipt = await reviewWith(
-      reviewSeat,
-      {
-        goal: input.goal,
-        proposal: plan.finalAnswer,
-        constraints: input.constraints,
-        evidence: input.evidence,
-        config,
+    let reviewReceipt: ReviewerReceipt | undefined;
+    const reviewSeats = seatsByPreference(seats.runnable, ["verifier", "method"])
+      .sort((a, b) => Number(a === fusionSeat) - Number(b === fusionSeat));
+    for (const reviewSeat of reviewSeats) {
+      const attempt = await reviewWith(
+        reviewSeat,
+        {
+          goal: input.goal,
+          proposal: plan.finalAnswer,
+          constraints: input.constraints,
+          evidence: input.evidence,
+          config,
+          deps,
+        },
         deps,
-      },
-      deps,
-      reserveFor(config, deps),
-    );
-    reviewerReceipts.push(reviewReceipt);
+        reserveFor(config, deps),
+      );
+      reviewerReceipts.push(attempt);
+      reviewReceipt = attempt;
+      if (attempt.status === "ok") break;
+    }
+    if (!reviewReceipt) return unavailable("no runnable seat available for final fusion review");
     const reviewFindings = reviewReceipt.findings;
     const status: VerdictStatus =
       reviewReceipt.status !== "ok"

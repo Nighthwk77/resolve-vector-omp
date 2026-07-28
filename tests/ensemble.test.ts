@@ -139,6 +139,7 @@ function makeEnsembleDeps(options: {
   reviewText?: string;
   checks?: (candidate: { anonId: string; text: string }) => CheckReceipt[];
   rng?: () => number;
+  fail?: (seatId: string, system: string) => boolean;
 }): EnsembleHarness {
   const judgePrompts: string[] = [];
   const calls: { seatId: string; system: string }[] = [];
@@ -146,6 +147,7 @@ function makeEnsembleDeps(options: {
     resolveReviewer: async (config) => okResolution(config),
     complete: async (resolved, system, prompt) => {
       calls.push({ seatId: resolved.config.id, system });
+      if (options.fail?.(resolved.config.id, system)) throw new Error(`${resolved.config.id} unavailable`);
       if (system === CANDIDATE_SYSTEM_PROMPT) {
         return { text: options.candidateTexts[resolved.config.id] ?? `answer from ${resolved.config.id}` };
       }
@@ -293,6 +295,30 @@ test("runEnsemble compare: completes without selecting a winner", async () => {
   assert.equal(verdict.selectedCandidateId, undefined);
   assert.equal(verdict.finalAnswer, undefined);
   assert.ok(verdict.summary.includes("candidate-A") && verdict.summary.includes("candidate-B"));
+});
+
+test("runEnsemble fusion falls back when the preferred verifier is unavailable", async () => {
+  const h = makeEnsembleDeps({
+    candidateTexts: { "gen-1": "alpha", "gen-2": "beta" },
+    fail: (seatId, system) => seatId === "down-verifier" &&
+      (system === CANDIDATE_SYSTEM_PROMPT || system === GENERIC_REVIEW_SYSTEM_PROMPT),
+  });
+  const verdict = await runEnsemble({
+    mode: "fusion",
+    goal: "combine them",
+    candidateCount: 3,
+    config: configWith([seat("gen-1"), seat("gen-2"), seat("down-verifier", "verifier")]),
+    deps: h.deps,
+  });
+  assert.equal(verdict.status, "pass");
+  assert.ok(
+    h.calls.some((call) => call.seatId === "down-verifier" && call.system === GENERIC_REVIEW_SYSTEM_PROMPT),
+    "preferred verifier should be attempted",
+  );
+  assert.ok(
+    h.calls.some((call) => call.seatId !== "down-verifier" && call.system === GENERIC_REVIEW_SYSTEM_PROMPT),
+    "a healthy seat should perform the final review after verifier failure",
+  );
 });
 
 test("runEnsemble fails closed with fewer than two runnable seats", async () => {
