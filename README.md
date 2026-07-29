@@ -12,6 +12,13 @@ a bounded correction when something material is wrong.
 
 No extra app. No focused browser windows. Reviews run headlessly inside OMP.
 
+## Watch six real runs
+
+See narrated examples of independent review, completion evidence checks, plan
+review, Best-of-N selection, fusion, and local/private reviewer controls:
+
+**[Watch the six-part Resolve Vector series on YouTube](https://www.youtube.com/playlist?list=PLbiGzJDV5Lr0)**
+
 ## Why use it?
 
 A model is often least reliable when reviewing its own reasoning. RV makes
